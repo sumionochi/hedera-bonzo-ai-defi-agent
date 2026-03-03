@@ -3,6 +3,19 @@
 // Sources: CoinGecko, Alternative.me Fear & Greed, NewsAPI
 // ============================================
 
+// --- Simple in-memory cache to avoid CoinGecko 429 rate limits ---
+const cache = new Map<string, { data: any; expires: number }>();
+
+function getCached<T>(key: string): T | null {
+  const entry = cache.get(key);
+  if (entry && Date.now() < entry.expires) return entry.data as T;
+  return null;
+}
+
+function setCache(key: string, data: any, ttlMs: number) {
+  cache.set(key, { data, expires: Date.now() + ttlMs });
+}
+
 export interface PriceData {
   price: number;
   change24h: number;
@@ -34,7 +47,10 @@ export interface SentimentResult {
     hbarPrice: number;
     hbarChange24h: number;
     fearGreedIndex: number;
+    fearGreedValue: number; // numeric value 0-100
     fearGreedLabel: string;
+    volatility: number; // annualized %
+    volatilityTrend: string;
     newsCount: number;
   };
 }
@@ -44,9 +60,11 @@ export interface SentimentResult {
  * Free API: no key needed, 10-30 calls/minute
  */
 export async function getHBARPrice(): Promise<PriceData> {
+  const cached = getCached<PriceData>("hbar_price");
+  if (cached) return cached;
+
   const res = await fetch(
-    "https://api.coingecko.com/api/v3/simple/price?ids=hedera-hashgraph&vs_currencies=usd&include_24hr_change=true&include_7d_change=true&include_market_cap=true&include_24hr_vol=true",
-    { cache: "no-store" as RequestCache } // cache 2 min
+    "https://api.coingecko.com/api/v3/simple/price?ids=hedera-hashgraph&vs_currencies=usd&include_24hr_change=true&include_7d_change=true&include_market_cap=true&include_24hr_vol=true"
   );
 
   if (!res.ok) {
@@ -56,13 +74,15 @@ export async function getHBARPrice(): Promise<PriceData> {
   const data = await res.json();
   const hbar = data["hedera-hashgraph"];
 
-  return {
+  const result: PriceData = {
     price: hbar.usd,
     change24h: hbar.usd_24h_change || 0,
     change7d: hbar.usd_7d_change || 0,
     marketCap: hbar.usd_market_cap || 0,
     volume24h: hbar.usd_24h_vol || 0,
   };
+  setCache("hbar_price", result, 120_000); // 2 min
+  return result;
 }
 
 /**
@@ -72,9 +92,12 @@ export async function getHBARPrice(): Promise<PriceData> {
 export async function getHBARPriceHistory(
   days: number = 7
 ): Promise<{ timestamp: number; price: number }[]> {
+  const cacheKey = `hbar_history_${days}`;
+  const cached = getCached<{ timestamp: number; price: number }[]>(cacheKey);
+  if (cached) return cached;
+
   const res = await fetch(
-    `https://api.coingecko.com/api/v3/coins/hedera-hashgraph/market_chart?vs_currency=usd&days=${days}`,
-    { cache: "no-store" as RequestCache } // cache 5 min
+    `https://api.coingecko.com/api/v3/coins/hedera-hashgraph/market_chart?vs_currency=usd&days=${days}`
   );
 
   if (!res.ok) {
@@ -82,10 +105,12 @@ export async function getHBARPriceHistory(
   }
 
   const data = await res.json();
-  return data.prices.map(([timestamp, price]: [number, number]) => ({
+  const result = data.prices.map(([timestamp, price]: [number, number]) => ({
     timestamp,
     price,
   }));
+  setCache(cacheKey, result, 300_000); // 5 min
+  return result;
 }
 
 /**
@@ -93,6 +118,9 @@ export async function getHBARPriceHistory(
  * Source: alternative.me — free, no API key
  */
 export async function getFearGreedIndex(): Promise<FearGreedData> {
+  const cached = getCached<FearGreedData>("fear_greed");
+  if (cached) return cached;
+
   const res = await fetch("https://api.alternative.me/fng/?limit=1");
 
   if (!res.ok) {
@@ -102,11 +130,13 @@ export async function getFearGreedIndex(): Promise<FearGreedData> {
   const data = await res.json();
   const entry = data.data[0];
 
-  return {
+  const result: FearGreedData = {
     value: parseInt(entry.value),
     classification: entry.value_classification,
     timestamp: new Date(parseInt(entry.timestamp) * 1000).toISOString(),
   };
+  setCache("fear_greed", result, 1_800_000); // 30 min
+  return result;
 }
 
 /**
@@ -124,7 +154,9 @@ export async function getCryptoNews(
   }
 
   const res = await fetch(
-    `https://newsapi.org/v2/everything?q=${encodeURIComponent(query)}&sortBy=publishedAt&language=en&pageSize=10&apiKey=${apiKey}`,
+    `https://newsapi.org/v2/everything?q=${encodeURIComponent(
+      query
+    )}&sortBy=publishedAt&language=en&pageSize=10&apiKey=${apiKey}`,
     { cache: "no-store" as RequestCache } // cache 15 min
   );
 
@@ -197,7 +229,11 @@ export function calculateVolatility(
   const changePercent = ((lastPrice - firstPrice) / firstPrice) * 100;
 
   const trend: "uptrend" | "downtrend" | "sideways" =
-    changePercent > 3 ? "uptrend" : changePercent < -3 ? "downtrend" : "sideways";
+    changePercent > 3
+      ? "uptrend"
+      : changePercent < -3
+      ? "downtrend"
+      : "sideways";
 
   return {
     volatility: annualizedVol,
@@ -212,6 +248,9 @@ export function calculateVolatility(
  * Uses rule-based scoring (no LLM needed for this part = faster + cheaper)
  */
 export async function analyzeSentiment(): Promise<SentimentResult> {
+  const cached = getCached<SentimentResult>("sentiment_result");
+  if (cached) return cached;
+
   // Fetch all data in parallel
   const [priceData, fearGreed, news, priceHistory] = await Promise.all([
     getHBARPrice(),
@@ -288,7 +327,7 @@ export async function analyzeSentiment(): Promise<SentimentResult> {
       2
   );
 
-  return {
+  const result: SentimentResult = {
     score,
     signal,
     confidence: Math.round(confidence * 100) / 100,
@@ -300,8 +339,13 @@ export async function analyzeSentiment(): Promise<SentimentResult> {
       hbarPrice: priceData.price,
       hbarChange24h: priceData.change24h,
       fearGreedIndex: fearGreed.value,
+      fearGreedValue: fearGreed.value,
       fearGreedLabel: fearGreed.classification,
+      volatility: vol.volatility,
+      volatilityTrend: vol.trend,
       newsCount: news.length,
     },
   };
+  setCache("sentiment_result", result, 120_000); // 2 min
+  return result;
 }

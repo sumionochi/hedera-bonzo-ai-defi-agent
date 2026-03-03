@@ -18,6 +18,11 @@ import {
   Bot,
   User,
   ExternalLink,
+  Play,
+  Wallet,
+  ArrowUpRight,
+  Clock,
+  FileText,
 } from "lucide-react";
 
 // ============================================
@@ -45,6 +50,8 @@ interface SentimentData {
     fearGreedIndex: number;
     fearGreedLabel: string;
     newsCount: number;
+    volatility?: number;
+    volatilityTrend?: string;
   };
 }
 
@@ -56,6 +63,45 @@ interface ChatMessage {
   timestamp: Date;
 }
 
+interface UserPosition {
+  symbol: string;
+  supplied: number;
+  suppliedUSD: number;
+  borrowed: number;
+  borrowedUSD: number;
+  supplyAPY: number;
+  borrowAPY: number;
+  isCollateral: boolean;
+}
+
+interface PortfolioData {
+  positions: UserPosition[];
+  totalSuppliedUSD: number;
+  totalBorrowedUSD: number;
+  netWorthUSD: number;
+  healthFactor: number;
+  averageNetAPY: number;
+  note?: string;
+}
+
+interface KeeperDecision {
+  action: string;
+  reason: string;
+  confidence: number;
+  params?: Record<string, unknown>;
+  timestamp: string;
+}
+
+interface KeeperResult {
+  decision: KeeperDecision;
+  sentiment: { score: number; signal: string; reasoning: string };
+  portfolio: PortfolioData | null;
+  execution: { executed: boolean; agentResponse?: string; error?: string };
+  hcsLog: { logged: boolean; topicId?: string; sequenceNumber?: number; error?: string };
+  durationMs: number;
+  timestamp: string;
+}
+
 // ============================================
 // Main Page
 // ============================================
@@ -63,6 +109,9 @@ interface ChatMessage {
 export default function Home() {
   const [markets, setMarkets] = useState<MarketReserve[]>([]);
   const [sentiment, setSentiment] = useState<SentimentData | null>(null);
+  const [portfolio, setPortfolio] = useState<PortfolioData | null>(null);
+  const [keeperResult, setKeeperResult] = useState<KeeperResult | null>(null);
+  const [keeperHistory, setKeeperHistory] = useState<KeeperResult[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: "welcome",
@@ -76,12 +125,15 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [marketLoading, setMarketLoading] = useState(true);
   const [marketError, setMarketError] = useState<string | null>(null);
+  const [keeperRunning, setKeeperRunning] = useState(false);
+  const [positionsLoading, setPositionsLoading] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Fetch real market data on load
+  // Fetch market data on load
   useEffect(() => {
     fetchMarketData();
-    const interval = setInterval(fetchMarketData, 60_000); // refresh every 60s
+    fetchPositions();
+    const interval = setInterval(fetchMarketData, 60_000);
     return () => clearInterval(interval);
   }, []);
 
@@ -105,6 +157,40 @@ export default function Home() {
       setMarketError(err.message || "Network error");
     } finally {
       setMarketLoading(false);
+    }
+  }
+
+  async function fetchPositions() {
+    try {
+      const res = await fetch("/api/positions");
+      const json = await res.json();
+      if (json.success) {
+        setPortfolio(json.data);
+      }
+    } catch (err: any) {
+      console.error("Failed to fetch positions:", err);
+    } finally {
+      setPositionsLoading(false);
+    }
+  }
+
+  async function runKeeper(execute: boolean = false) {
+    setKeeperRunning(true);
+    try {
+      const res = await fetch(`/api/keeper?execute=${execute}`);
+      const json = await res.json();
+      if (json.success) {
+        setKeeperResult(json.data);
+        setKeeperHistory((prev) => [json.data, ...prev].slice(0, 10));
+        // Refresh positions after execution
+        if (execute && json.data.execution?.executed) {
+          fetchPositions();
+        }
+      }
+    } catch (err: any) {
+      console.error("Keeper error:", err);
+    } finally {
+      setKeeperRunning(false);
     }
   }
 
@@ -203,7 +289,20 @@ export default function Home() {
       <main className="flex-1 max-w-7xl mx-auto w-full px-4 py-6">
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-full">
           {/* Left: Dashboard Panels */}
-          <div className="lg:col-span-1 space-y-4">
+          <div className="lg:col-span-1 space-y-4 overflow-y-auto max-h-[calc(100vh-120px)]">
+            {/* Keeper Controls */}
+            <KeeperPanel
+              result={keeperResult}
+              running={keeperRunning}
+              onRun={runKeeper}
+            />
+
+            {/* Positions */}
+            <PositionsCard
+              portfolio={portfolio}
+              loading={positionsLoading}
+            />
+
             {/* Sentiment Card */}
             <SentimentCard sentiment={sentiment} loading={marketLoading} />
 
@@ -213,6 +312,11 @@ export default function Home() {
               loading={marketLoading}
               error={marketError}
             />
+
+            {/* Decision History */}
+            {keeperHistory.length > 0 && (
+              <DecisionHistoryCard history={keeperHistory} />
+            )}
 
             {/* Agent Status */}
             <div className="rounded-xl border border-gray-800/60 bg-gray-900/40 p-4 card-glow">
@@ -240,6 +344,10 @@ export default function Home() {
                 <div className="flex justify-between">
                   <span className="text-gray-500">Audit</span>
                   <span className="text-gray-300">HCS On-Chain</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Decisions logged</span>
+                  <span className="text-gray-300">{keeperHistory.length}</span>
                 </div>
               </div>
             </div>
@@ -339,18 +447,17 @@ export default function Home() {
                   <Send className="w-4 h-4" />
                 </button>
               </div>
-              <div className="flex gap-2 mt-2">
+              <div className="flex gap-2 mt-2 flex-wrap">
                 {[
                   "Check market rates",
                   "Analyze sentiment",
                   "Check my balance",
                   "Deposit 100 HBAR",
+                  "What are my positions?",
                 ].map((q) => (
                   <button
                     key={q}
-                    onClick={() => {
-                      setInput(q);
-                    }}
+                    onClick={() => setInput(q)}
                     className="text-[11px] text-gray-500 hover:text-gray-300 bg-gray-800/40 hover:bg-gray-800/60 rounded-full px-3 py-1 transition-colors"
                   >
                     {q}
@@ -361,6 +468,318 @@ export default function Home() {
           </div>
         </div>
       </main>
+    </div>
+  );
+}
+
+// ============================================
+// Keeper Panel Component
+// ============================================
+
+function KeeperPanel({
+  result,
+  running,
+  onRun,
+}: {
+  result: KeeperResult | null;
+  running: boolean;
+  onRun: (execute: boolean) => void;
+}) {
+  const actionColors: Record<string, string> = {
+    HOLD: "text-yellow-400 bg-yellow-400/10 border-yellow-400/20",
+    HARVEST: "text-red-400 bg-red-400/10 border-red-400/20",
+    REPAY_DEBT: "text-red-400 bg-red-400/10 border-red-400/20",
+    EXIT_TO_STABLE: "text-red-400 bg-red-400/10 border-red-400/20",
+    REBALANCE: "text-blue-400 bg-blue-400/10 border-blue-400/20",
+    INCREASE_POSITION: "text-emerald-400 bg-emerald-400/10 border-emerald-400/20",
+  };
+
+  return (
+    <div className="rounded-xl border border-gray-800/60 bg-gray-900/40 p-4 card-glow">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <Shield className="w-4 h-4 text-emerald-400" />
+          <h3 className="text-sm font-medium text-gray-300">
+            Keeper Engine
+          </h3>
+        </div>
+      </div>
+
+      {/* Action buttons */}
+      <div className="flex gap-2 mb-3">
+        <button
+          onClick={() => onRun(false)}
+          disabled={running}
+          className="flex-1 flex items-center justify-center gap-1.5 text-xs font-medium px-3 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700/50 transition-colors disabled:opacity-50"
+        >
+          {running ? (
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          ) : (
+            <Play className="w-3.5 h-3.5" />
+          )}
+          Dry Run
+        </button>
+        <button
+          onClick={() => onRun(true)}
+          disabled={running}
+          className="flex-1 flex items-center justify-center gap-1.5 text-xs font-medium px-3 py-2 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/20 transition-colors disabled:opacity-50"
+        >
+          {running ? (
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          ) : (
+            <Zap className="w-3.5 h-3.5" />
+          )}
+          Execute
+        </button>
+      </div>
+
+      {/* Last decision */}
+      {result ? (
+        <div className="space-y-2">
+          <div
+            className={`text-xs font-medium px-2.5 py-1.5 rounded-lg border inline-block ${
+              actionColors[result.decision.action] || "text-gray-400 bg-gray-800 border-gray-700"
+            }`}
+          >
+            {result.decision.action}
+          </div>
+          <p className="text-[11px] text-gray-400 leading-relaxed">
+            {result.decision.reason}
+          </p>
+          <div className="flex items-center gap-3 text-[10px] text-gray-500">
+            <span>
+              Confidence: {(result.decision.confidence * 100).toFixed(0)}%
+            </span>
+            <span>•</span>
+            <span>{result.durationMs}ms</span>
+            {result.hcsLog.logged && (
+              <>
+                <span>•</span>
+                <span className="text-emerald-400 flex items-center gap-0.5">
+                  <CheckCircle className="w-3 h-3" />
+                  HCS logged
+                </span>
+              </>
+            )}
+          </div>
+          {result.execution.executed && result.execution.agentResponse && (
+            <div className="mt-2 p-2 bg-gray-800/40 rounded-lg text-[11px] text-gray-400 border border-gray-700/30">
+              <span className="text-emerald-400 font-medium">Agent: </span>
+              {result.execution.agentResponse.substring(0, 200)}
+              {result.execution.agentResponse.length > 200 ? "..." : ""}
+            </div>
+          )}
+        </div>
+      ) : (
+        <p className="text-[11px] text-gray-600">
+          Run the keeper to analyze markets, check positions, and decide on actions. Dry Run
+          simulates; Execute performs real transactions.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ============================================
+// Positions Card Component
+// ============================================
+
+function PositionsCard({
+  portfolio,
+  loading,
+}: {
+  portfolio: PortfolioData | null;
+  loading: boolean;
+}) {
+  if (loading) {
+    return (
+      <div className="rounded-xl border border-gray-800/60 bg-gray-900/40 p-4 card-glow">
+        <div className="flex items-center gap-2 mb-3">
+          <Wallet className="w-4 h-4 text-gray-500" />
+          <h3 className="text-sm font-medium text-gray-400">
+            Loading positions...
+          </h3>
+        </div>
+        <div className="h-12 animate-pulse bg-gray-800/40 rounded-lg" />
+      </div>
+    );
+  }
+
+  const hasPositions =
+    portfolio &&
+    portfolio.positions.length > 0 &&
+    (portfolio.totalSuppliedUSD > 0 || portfolio.totalBorrowedUSD > 0);
+
+  return (
+    <div className="rounded-xl border border-gray-800/60 bg-gray-900/40 p-4 card-glow">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <Wallet className="w-4 h-4 text-emerald-400" />
+          <h3 className="text-sm font-medium text-gray-300">
+            Bonzo Positions
+          </h3>
+        </div>
+        {hasPositions && portfolio.healthFactor > 0 && (
+          <HealthBadge value={portfolio.healthFactor} />
+        )}
+      </div>
+
+      {!hasPositions ? (
+        <div className="text-center py-3">
+          <p className="text-xs text-gray-500">No active positions</p>
+          <p className="text-[10px] text-gray-600 mt-1">
+            Deposit assets via chat or at{" "}
+            <a
+              href="https://testnet.bonzo.finance"
+              className="text-emerald-400 hover:underline"
+              target="_blank"
+            >
+              testnet.bonzo.finance
+            </a>
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {/* Summary row */}
+          <div className="grid grid-cols-3 gap-2 text-xs">
+            <div className="bg-gray-800/40 rounded-lg px-2.5 py-2">
+              <span className="text-gray-500 text-[10px]">Supplied</span>
+              <div className="text-emerald-400 font-medium">
+                ${portfolio.totalSuppliedUSD.toFixed(2)}
+              </div>
+            </div>
+            <div className="bg-gray-800/40 rounded-lg px-2.5 py-2">
+              <span className="text-gray-500 text-[10px]">Borrowed</span>
+              <div className="text-red-400 font-medium">
+                ${portfolio.totalBorrowedUSD.toFixed(2)}
+              </div>
+            </div>
+            <div className="bg-gray-800/40 rounded-lg px-2.5 py-2">
+              <span className="text-gray-500 text-[10px]">Net APY</span>
+              <div className="text-gray-200 font-medium">
+                {portfolio.averageNetAPY.toFixed(2)}%
+              </div>
+            </div>
+          </div>
+
+          {/* Individual positions */}
+          {portfolio.positions.map((pos) => (
+            <div
+              key={pos.symbol}
+              className="flex items-center justify-between text-xs px-2 py-1.5 hover:bg-gray-800/30 rounded transition-colors"
+            >
+              <div className="flex items-center gap-2">
+                <span className="text-gray-300 font-medium w-16">
+                  {pos.symbol}
+                </span>
+                {pos.isCollateral && (
+                  <span className="text-[9px] bg-emerald-500/10 text-emerald-400 rounded px-1 py-0.5">
+                    collateral
+                  </span>
+                )}
+              </div>
+              <div className="text-right">
+                {pos.supplied > 0 && (
+                  <span className="text-emerald-400">
+                    +{pos.supplied.toFixed(4)}
+                  </span>
+                )}
+                {pos.borrowed > 0 && (
+                  <span className="text-red-400 ml-2">
+                    -{pos.borrowed.toFixed(4)}
+                  </span>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function HealthBadge({ value }: { value: number }) {
+  let color = "text-emerald-400 bg-emerald-400/10";
+  let label = "Healthy";
+
+  if (value < 1.1) {
+    color = "text-red-400 bg-red-400/10";
+    label = "DANGER";
+  } else if (value < 1.3) {
+    color = "text-orange-400 bg-orange-400/10";
+    label = "At Risk";
+  } else if (value < 1.8) {
+    color = "text-yellow-400 bg-yellow-400/10";
+    label = "Moderate";
+  }
+
+  return (
+    <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${color}`}>
+      HF: {value.toFixed(2)} • {label}
+    </span>
+  );
+}
+
+// ============================================
+// Decision History Card
+// ============================================
+
+function DecisionHistoryCard({ history }: { history: KeeperResult[] }) {
+  const actionIcons: Record<string, string> = {
+    HOLD: "🟡",
+    HARVEST: "🔴",
+    REPAY_DEBT: "🔴",
+    EXIT_TO_STABLE: "🔴",
+    REBALANCE: "🔵",
+    INCREASE_POSITION: "🟢",
+  };
+
+  return (
+    <div className="rounded-xl border border-gray-800/60 bg-gray-900/40 p-4 card-glow">
+      <div className="flex items-center gap-2 mb-3">
+        <FileText className="w-4 h-4 text-emerald-400" />
+        <h3 className="text-sm font-medium text-gray-300">
+          Decision Log
+        </h3>
+        <span className="text-[10px] text-gray-500 ml-auto">
+          {history.length} entries
+        </span>
+      </div>
+
+      <div className="space-y-2 max-h-48 overflow-y-auto">
+        {history.map((entry, i) => (
+          <div
+            key={i}
+            className="flex gap-2 text-[11px] py-1.5 border-b border-gray-800/30 last:border-0"
+          >
+            <span className="flex-shrink-0 mt-0.5">
+              {actionIcons[entry.decision.action] || "⚪"}
+            </span>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="font-medium text-gray-300">
+                  {entry.decision.action}
+                </span>
+                <span className="text-gray-600">
+                  {(entry.decision.confidence * 100).toFixed(0)}%
+                </span>
+                {entry.hcsLog.logged && (
+                  <CheckCircle className="w-3 h-3 text-emerald-400 flex-shrink-0" />
+                )}
+              </div>
+              <p className="text-gray-500 truncate">
+                {entry.decision.reason}
+              </p>
+              <span className="text-gray-600 text-[10px]">
+                {new Date(entry.timestamp).toLocaleTimeString()}
+                {entry.hcsLog.topicId && (
+                  <> • HCS: {entry.hcsLog.topicId}</>
+                )}
+              </span>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -484,6 +903,20 @@ function SentimentCard({
           </span>
         </div>
       </div>
+
+      {sentiment.dataPoints.volatility !== undefined && (
+        <div className="mt-2 bg-gray-800/40 rounded-lg px-3 py-2 text-xs">
+          <span className="text-gray-500">Volatility</span>
+          <span className="text-gray-200 font-medium ml-2">
+            {sentiment.dataPoints.volatility.toFixed(0)}% annualized
+          </span>
+          {sentiment.dataPoints.volatilityTrend && (
+            <span className="text-gray-500 ml-1">
+              ({sentiment.dataPoints.volatilityTrend})
+            </span>
+          )}
+        </div>
+      )}
 
       <p className="text-[11px] text-gray-500 mt-2 leading-relaxed">
         {sentiment.reasoning}
