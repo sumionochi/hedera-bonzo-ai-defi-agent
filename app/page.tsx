@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
   Brain,
   Send,
@@ -10,7 +10,6 @@ import {
   Shield,
   Activity,
   Zap,
-  ChevronRight,
   Loader2,
   AlertTriangle,
   CheckCircle,
@@ -20,9 +19,10 @@ import {
   ExternalLink,
   Play,
   Wallet,
-  ArrowUpRight,
   Clock,
   FileText,
+  Pause,
+  Timer,
 } from "lucide-react";
 
 // ============================================
@@ -97,7 +97,12 @@ interface KeeperResult {
   sentiment: { score: number; signal: string; reasoning: string };
   portfolio: PortfolioData | null;
   execution: { executed: boolean; agentResponse?: string; error?: string };
-  hcsLog: { logged: boolean; topicId?: string; sequenceNumber?: number; error?: string };
+  hcsLog: {
+    logged: boolean;
+    topicId?: string;
+    sequenceNumber?: number;
+    error?: string;
+  };
   durationMs: number;
   timestamp: string;
 }
@@ -127,6 +132,14 @@ export default function Home() {
   const [marketError, setMarketError] = useState<string | null>(null);
   const [keeperRunning, setKeeperRunning] = useState(false);
   const [positionsLoading, setPositionsLoading] = useState(true);
+
+  // Auto-loop state
+  const [autoLoop, setAutoLoop] = useState(false);
+  const [loopInterval, setLoopInterval] = useState(5); // minutes
+  const [countdown, setCountdown] = useState(0); // seconds remaining
+  const loopTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Fetch market data on load
@@ -141,6 +154,55 @@ export default function Home() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // Auto-loop keeper
+  const runKeeperForLoop = useCallback(async () => {
+    if (keeperRunning) return;
+    setKeeperRunning(true);
+    try {
+      const res = await fetch("/api/keeper?execute=false");
+      const json = await res.json();
+      if (json.success) {
+        setKeeperResult(json.data);
+        setKeeperHistory((prev) => [json.data, ...prev].slice(0, 20));
+      }
+    } catch (err: any) {
+      console.error("Auto-keeper error:", err);
+    } finally {
+      setKeeperRunning(false);
+    }
+  }, [keeperRunning]);
+
+  useEffect(() => {
+    if (autoLoop) {
+      // Run immediately on enable
+      runKeeperForLoop();
+      setCountdown(loopInterval * 60);
+
+      // Set up loop
+      loopTimerRef.current = setInterval(
+        () => {
+          runKeeperForLoop();
+          setCountdown(loopInterval * 60);
+        },
+        loopInterval * 60 * 1000
+      );
+
+      // Countdown ticker
+      countdownRef.current = setInterval(() => {
+        setCountdown((prev) => Math.max(0, prev - 1));
+      }, 1000);
+    } else {
+      if (loopTimerRef.current) clearInterval(loopTimerRef.current);
+      if (countdownRef.current) clearInterval(countdownRef.current);
+      setCountdown(0);
+    }
+
+    return () => {
+      if (loopTimerRef.current) clearInterval(loopTimerRef.current);
+      if (countdownRef.current) clearInterval(countdownRef.current);
+    };
+  }, [autoLoop, loopInterval, runKeeperForLoop]);
 
   async function fetchMarketData() {
     try {
@@ -181,8 +243,7 @@ export default function Home() {
       const json = await res.json();
       if (json.success) {
         setKeeperResult(json.data);
-        setKeeperHistory((prev) => [json.data, ...prev].slice(0, 10));
-        // Refresh positions after execution
+        setKeeperHistory((prev) => [json.data, ...prev].slice(0, 20));
         if (execute && json.data.execution?.executed) {
           fetchPositions();
         }
@@ -268,7 +329,13 @@ export default function Home() {
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
+            {autoLoop && (
+              <div className="flex items-center gap-1.5 text-xs text-emerald-400 bg-emerald-500/10 rounded-full px-3 py-1.5">
+                <Timer className="w-3 h-3" />
+                Next: {formatCountdown(countdown)}
+              </div>
+            )}
             <div className="flex items-center gap-1.5 text-xs text-gray-400 bg-gray-900 rounded-full px-3 py-1.5">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse-dot" />
               Live
@@ -279,7 +346,7 @@ export default function Home() {
               rel="noopener noreferrer"
               className="text-xs text-gray-500 hover:text-gray-300 flex items-center gap-1"
             >
-              Bonzo Testnet <ExternalLink className="w-3 h-3" />
+              Bonzo <ExternalLink className="w-3 h-3" />
             </a>
           </div>
         </div>
@@ -295,13 +362,16 @@ export default function Home() {
               result={keeperResult}
               running={keeperRunning}
               onRun={runKeeper}
+              autoLoop={autoLoop}
+              onToggleLoop={() => setAutoLoop(!autoLoop)}
+              loopInterval={loopInterval}
+              onSetInterval={setLoopInterval}
+              countdown={countdown}
+              historyCount={keeperHistory.length}
             />
 
             {/* Positions */}
-            <PositionsCard
-              portfolio={portfolio}
-              loading={positionsLoading}
-            />
+            <PositionsCard portfolio={portfolio} loading={positionsLoading} />
 
             {/* Sentiment Card */}
             <SentimentCard sentiment={sentiment} loading={marketLoading} />
@@ -330,7 +400,7 @@ export default function Home() {
                 <div className="flex justify-between">
                   <span className="text-gray-500">Mode</span>
                   <span className="text-emerald-400 font-medium">
-                    Autonomous
+                    {autoLoop ? "Auto-Keeper" : "Manual"}
                   </span>
                 </div>
                 <div className="flex justify-between">
@@ -362,7 +432,7 @@ export default function Home() {
                 Chat with VaultMind
               </span>
               <span className="ml-auto text-[10px] text-gray-600">
-                Powered by Hedera Agent Kit + Bonzo Plugin
+                Context-aware • Hedera Agent Kit + Bonzo Plugin
               </span>
             </div>
 
@@ -472,6 +542,14 @@ export default function Home() {
   );
 }
 
+// ── Helpers ──
+
+function formatCountdown(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
 // ============================================
 // Keeper Panel Component
 // ============================================
@@ -480,10 +558,22 @@ function KeeperPanel({
   result,
   running,
   onRun,
+  autoLoop,
+  onToggleLoop,
+  loopInterval,
+  onSetInterval,
+  countdown,
+  historyCount,
 }: {
   result: KeeperResult | null;
   running: boolean;
   onRun: (execute: boolean) => void;
+  autoLoop: boolean;
+  onToggleLoop: () => void;
+  loopInterval: number;
+  onSetInterval: (n: number) => void;
+  countdown: number;
+  historyCount: number;
 }) {
   const actionColors: Record<string, string> = {
     HOLD: "text-yellow-400 bg-yellow-400/10 border-yellow-400/20",
@@ -491,7 +581,8 @@ function KeeperPanel({
     REPAY_DEBT: "text-red-400 bg-red-400/10 border-red-400/20",
     EXIT_TO_STABLE: "text-red-400 bg-red-400/10 border-red-400/20",
     REBALANCE: "text-blue-400 bg-blue-400/10 border-blue-400/20",
-    INCREASE_POSITION: "text-emerald-400 bg-emerald-400/10 border-emerald-400/20",
+    INCREASE_POSITION:
+      "text-emerald-400 bg-emerald-400/10 border-emerald-400/20",
   };
 
   return (
@@ -499,13 +590,49 @@ function KeeperPanel({
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <Shield className="w-4 h-4 text-emerald-400" />
-          <h3 className="text-sm font-medium text-gray-300">
-            Keeper Engine
-          </h3>
+          <h3 className="text-sm font-medium text-gray-300">Keeper Engine</h3>
         </div>
+        {running && (
+          <Loader2 className="w-3.5 h-3.5 text-emerald-400 animate-spin" />
+        )}
       </div>
 
-      {/* Action buttons */}
+      {/* Auto-loop controls */}
+      <div className="flex items-center gap-2 mb-3 p-2 bg-gray-800/40 rounded-lg">
+        <button
+          onClick={onToggleLoop}
+          className={`flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1.5 rounded-md transition-colors ${
+            autoLoop
+              ? "bg-emerald-600/20 text-emerald-400 border border-emerald-500/30"
+              : "bg-gray-700/50 text-gray-400 border border-gray-600/30 hover:text-gray-300"
+          }`}
+        >
+          {autoLoop ? (
+            <Pause className="w-3 h-3" />
+          ) : (
+            <Timer className="w-3 h-3" />
+          )}
+          {autoLoop ? "Stop" : "Auto"}
+        </button>
+        <select
+          value={loopInterval}
+          onChange={(e) => onSetInterval(Number(e.target.value))}
+          className="text-[11px] bg-gray-800 border border-gray-700/40 rounded-md px-2 py-1.5 text-gray-300 focus:outline-none"
+        >
+          <option value={1}>1 min</option>
+          <option value={2}>2 min</option>
+          <option value={5}>5 min</option>
+          <option value={10}>10 min</option>
+          <option value={15}>15 min</option>
+        </select>
+        {autoLoop && countdown > 0 && (
+          <span className="text-[10px] text-gray-500 ml-auto">
+            Next: {formatCountdown(countdown)}
+          </span>
+        )}
+      </div>
+
+      {/* Manual action buttons */}
       <div className="flex gap-2 mb-3">
         <button
           onClick={() => onRun(false)}
@@ -536,12 +663,18 @@ function KeeperPanel({
       {/* Last decision */}
       {result ? (
         <div className="space-y-2">
-          <div
-            className={`text-xs font-medium px-2.5 py-1.5 rounded-lg border inline-block ${
-              actionColors[result.decision.action] || "text-gray-400 bg-gray-800 border-gray-700"
-            }`}
-          >
-            {result.decision.action}
+          <div className="flex items-center gap-2">
+            <div
+              className={`text-xs font-medium px-2.5 py-1.5 rounded-lg border inline-block ${
+                actionColors[result.decision.action] ||
+                "text-gray-400 bg-gray-800 border-gray-700"
+              }`}
+            >
+              {result.decision.action}
+            </div>
+            <span className="text-[10px] text-gray-600">
+              {new Date(result.timestamp).toLocaleTimeString()}
+            </span>
           </div>
           <p className="text-[11px] text-gray-400 leading-relaxed">
             {result.decision.reason}
@@ -557,7 +690,7 @@ function KeeperPanel({
                 <span>•</span>
                 <span className="text-emerald-400 flex items-center gap-0.5">
                   <CheckCircle className="w-3 h-3" />
-                  HCS logged
+                  HCS
                 </span>
               </>
             )}
@@ -572,8 +705,8 @@ function KeeperPanel({
         </div>
       ) : (
         <p className="text-[11px] text-gray-600">
-          Run the keeper to analyze markets, check positions, and decide on actions. Dry Run
-          simulates; Execute performs real transactions.
+          Run the keeper to analyze markets and decide on actions. Enable Auto
+          to run continuously.
         </p>
       )}
     </div>
@@ -640,7 +773,6 @@ function PositionsCard({
         </div>
       ) : (
         <div className="space-y-3">
-          {/* Summary row */}
           <div className="grid grid-cols-3 gap-2 text-xs">
             <div className="bg-gray-800/40 rounded-lg px-2.5 py-2">
               <span className="text-gray-500 text-[10px]">Supplied</span>
@@ -662,7 +794,6 @@ function PositionsCard({
             </div>
           </div>
 
-          {/* Individual positions */}
           {portfolio.positions.map((pos) => (
             <div
               key={pos.symbol}
@@ -714,7 +845,9 @@ function HealthBadge({ value }: { value: number }) {
   }
 
   return (
-    <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${color}`}>
+    <span
+      className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${color}`}
+    >
       HF: {value.toFixed(2)} • {label}
     </span>
   );
@@ -738,9 +871,7 @@ function DecisionHistoryCard({ history }: { history: KeeperResult[] }) {
     <div className="rounded-xl border border-gray-800/60 bg-gray-900/40 p-4 card-glow">
       <div className="flex items-center gap-2 mb-3">
         <FileText className="w-4 h-4 text-emerald-400" />
-        <h3 className="text-sm font-medium text-gray-300">
-          Decision Log
-        </h3>
+        <h3 className="text-sm font-medium text-gray-300">Decision Log</h3>
         <span className="text-[10px] text-gray-500 ml-auto">
           {history.length} entries
         </span>
@@ -767,14 +898,10 @@ function DecisionHistoryCard({ history }: { history: KeeperResult[] }) {
                   <CheckCircle className="w-3 h-3 text-emerald-400 flex-shrink-0" />
                 )}
               </div>
-              <p className="text-gray-500 truncate">
-                {entry.decision.reason}
-              </p>
+              <p className="text-gray-500 truncate">{entry.decision.reason}</p>
               <span className="text-gray-600 text-[10px]">
                 {new Date(entry.timestamp).toLocaleTimeString()}
-                {entry.hcsLog.topicId && (
-                  <> • HCS: {entry.hcsLog.topicId}</>
-                )}
+                {entry.hcsLog.topicId && <> • HCS: {entry.hcsLog.topicId}</>}
               </span>
             </div>
           </div>
@@ -843,13 +970,14 @@ function SentimentCard({
             Market Sentiment
           </h3>
         </div>
-        <div className={`flex items-center gap-1 text-xs font-medium ${signalColor}`}>
+        <div
+          className={`flex items-center gap-1 text-xs font-medium ${signalColor}`}
+        >
           <SignalIcon className="w-3.5 h-3.5" />
           {sentiment.signal.replace("_", " ")}
         </div>
       </div>
 
-      {/* Score bar */}
       <div className="mb-3">
         <div className="flex justify-between text-[10px] text-gray-600 mb-1">
           <span>Bearish</span>
@@ -871,11 +999,11 @@ function SentimentCard({
           />
         </div>
         <div className="text-center text-xs text-gray-400 mt-1">
-          Score: {sentiment.score} / Confidence: {(sentiment.confidence * 100).toFixed(0)}%
+          Score: {sentiment.score} / Confidence:{" "}
+          {(sentiment.confidence * 100).toFixed(0)}%
         </div>
       </div>
 
-      {/* Data Points */}
       <div className="grid grid-cols-2 gap-2 text-xs">
         <div className="bg-gray-800/40 rounded-lg px-3 py-2">
           <span className="text-gray-500">HBAR</span>
@@ -978,9 +1106,7 @@ function MarketCard({
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <BarChart3 className="w-4 h-4 text-emerald-400" />
-          <h3 className="text-sm font-medium text-gray-300">
-            Bonzo Markets
-          </h3>
+          <h3 className="text-sm font-medium text-gray-300">Bonzo Markets</h3>
         </div>
         <span className="text-[10px] text-gray-500">
           {activeMarkets.length} active
@@ -988,7 +1114,6 @@ function MarketCard({
       </div>
 
       <div className="space-y-1">
-        {/* Header */}
         <div className="grid grid-cols-4 text-[10px] text-gray-600 px-2 py-1">
           <span>Asset</span>
           <span className="text-right">Supply APY</span>
