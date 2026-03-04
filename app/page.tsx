@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import dynamic from "next/dynamic";
 import {
   Brain,
   Send,
@@ -24,6 +25,12 @@ import {
   Pause,
   Timer,
 } from "lucide-react";
+
+// Recharts uses browser APIs — dynamic import with ssr: false
+const PerformanceChart = dynamic(
+  () => import("@/components/Performancechart"),
+  { ssr: false }
+);
 
 // ============================================
 // Types
@@ -423,8 +430,13 @@ export default function Home() {
             </div>
           </div>
 
-          {/* Right: Chat Interface */}
-          <div className="lg:col-span-2 flex flex-col rounded-xl border border-gray-800/60 bg-gray-900/20 overflow-hidden min-h-[600px]">
+          {/* Right: Performance Chart + Chat Interface */}
+          <div className="lg:col-span-2 flex flex-col gap-4">
+            {/* Performance Chart */}
+            <PerformanceChart />
+
+            {/* Chat Interface */}
+            <div className="flex flex-col rounded-xl border border-gray-800/60 bg-gray-900/20 overflow-hidden min-h-[450px] flex-1">
             {/* Chat Header */}
             <div className="px-4 py-3 border-b border-gray-800/40 flex items-center gap-2">
               <Zap className="w-4 h-4 text-emerald-400" />
@@ -535,6 +547,7 @@ export default function Home() {
                 ))}
               </div>
             </div>
+          </div>
           </div>
         </div>
       </main>
