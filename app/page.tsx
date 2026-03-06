@@ -50,6 +50,25 @@ const MarkdownMessage = dynamic(
   () => import("@/components/MarkdownMessage"),
   { ssr: false }
 );
+// Gap closers: Wallet Connect, Transaction Modal, Thinking Steps, Strategy Config
+const WalletConnect = dynamic(
+  () => import("@/components/WalletConnect"),
+  { ssr: false }
+);
+const TransactionModal = dynamic(
+  () => import("@/components/TransactionModal"),
+  { ssr: false }
+);
+const AgentThinking = dynamic(
+  () => import("@/components/AgentThinking"),
+  { ssr: false }
+);
+const StrategyConfigPanel = dynamic(
+  () => import("@/components/StrategyConfig"),
+  { ssr: false }
+);
+import type { PendingTransaction, TransactionResult } from "@/components/TransactionModal";
+import type { PriceAlert } from "@/components/StrategyConfig";
 
 // ============================================
 // Types
@@ -149,35 +168,11 @@ export default function Home() {
     {
       id: "welcome",
       role: "assistant",
-      content: `### 👋 Welcome to **VaultMind**
-  
-  I'm your **AI DeFi Keeper Agent on Hedera**.  
-  I continuously monitor **Bonzo Finance** and **SaucerSwap** markets, analyze sentiment, and manage vault positions autonomously.
-  
-  ---
-  
-  ### 🚀 Try asking me:
-  
-  - **“Show my portfolio breakdown”**  
-    _Interactive pie chart_
-  
-  - **“How’s the market sentiment?”**  
-    _Live Fear & Greed gauge_
-  
-  - **“Compare APYs across platforms”**  
-    _Bonzo vs SaucerSwap_
-  
-  - **“Show correlation matrix”**  
-    _Asset correlation heat map_
-  
-  - **“Show risk vs return”**  
-    _Scatter plot analysis_
-  
-  - **“Show DeFi opportunities”**  
-    _Yield heat map_`,
+      content:
+        "Welcome to VaultMind! I'm your AI DeFi keeper agent on Hedera. I monitor Bonzo Finance & SaucerSwap markets, analyze sentiment, and manage vault positions autonomously.\n\nTry asking me:\n• \"Show my portfolio breakdown\" — interactive pie chart\n• \"How's the market sentiment?\" — live gauge with Fear & Greed\n• \"Compare APYs across platforms\" — Bonzo vs SaucerSwap chart\n• \"Show correlation matrix\" — asset correlation heat map\n• \"Show risk vs return\" — scatter plot analysis\n• \"Show DeFi opportunities\" — heat map of yields",
       timestamp: new Date(),
     },
-  ]);  
+  ]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [marketLoading, setMarketLoading] = useState(true);
@@ -194,6 +189,26 @@ export default function Home() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [activeTab, setActiveTab] = useState<"chat" | "chart" | "audit">("chat");
+
+  // Wallet connection state (Gap 1)
+  const [connectedAccount, setConnectedAccount] = useState<string | null>(null);
+  const [walletData, setWalletData] = useState<any>(null);
+
+  // Transaction confirmation state (Gap 2)
+  const [pendingTx, setPendingTx] = useState<PendingTransaction | null>(null);
+  const [lastTxResult, setLastTxResult] = useState<TransactionResult | null>(null);
+
+  // Strategy config state (Gap 5)
+  const [strategyConfig, setStrategyConfig] = useState({
+    bearishThreshold: -30,
+    bullishThreshold: 50,
+    confidenceMinimum: 0.6,
+    healthFactorDanger: 1.3,
+    healthFactorTarget: 1.8,
+    highVolatilityThreshold: 80,
+    minYieldDifferential: 2.0,
+  });
+  const [priceAlerts, setPriceAlerts] = useState<PriceAlert[]>([]);
 
   // Fetch market data on load
   useEffect(() => {
@@ -281,7 +296,11 @@ export default function Home() {
 
   async function fetchPositions() {
     try {
-      const res = await fetch("/api/positions");
+      const acct = connectedAccount || "";
+      const url = acct
+        ? `/api/positions?accountId=${acct}`
+        : "/api/positions";
+      const res = await fetch(url);
       const json = await res.json();
       if (json.success) {
         setPortfolio(json.data);
@@ -296,14 +315,57 @@ export default function Home() {
   async function runKeeper(execute: boolean = false) {
     setKeeperRunning(true);
     try {
-      const res = await fetch(`/api/keeper?execute=${execute}`);
+      // Use POST with custom strategy config
+      const res = await fetch("/api/keeper", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          config: strategyConfig,
+          execute: false, // Always dry-run first
+        }),
+      });
       const json = await res.json();
       if (json.success) {
         setKeeperResult(json.data);
         setKeeperHistory((prev) => [json.data, ...prev].slice(0, 20));
-        if (execute && json.data.execution?.executed) {
-          fetchPositions();
+
+        // If user wanted execution AND action is not HOLD, show confirmation modal
+        if (execute && json.data.decision.action !== "HOLD") {
+          setPendingTx({
+            id: Date.now().toString(),
+            action: json.data.decision.action,
+            description: json.data.decision.reason,
+            details: {
+              token: json.data.decision.params?.tokenSymbol || "HBAR",
+              amount: json.data.decision.params?.amount || "auto",
+              reason: json.data.decision.reason,
+              confidence: json.data.decision.confidence,
+              estimatedGas: "~$0.001",
+            },
+            source: "keeper",
+            onApprove: async () => {
+              // Actually execute now
+              const execRes = await fetch("/api/keeper", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  config: strategyConfig,
+                  execute: true,
+                }),
+              });
+              const execJson = await execRes.json();
+              if (execJson.success && execJson.data.execution?.executed) {
+                fetchPositions();
+                return { success: true, txId: execJson.data.execution?.txId };
+              }
+              return { success: false, error: execJson.data.execution?.error || "Execution failed" };
+            },
+            onReject: () => {},
+          });
+        } else if (execute && json.data.decision.action === "HOLD") {
+          // HOLD action — no confirmation needed, just log
         }
+
         // Propagate HCS topic ID to localStorage for HCS Audit tab
         if (json.data.hcsLog?.topicId && typeof window !== "undefined") {
           localStorage.setItem("vaultmind_hcs_topic", json.data.hcsLog.topicId);
@@ -400,6 +462,12 @@ export default function Home() {
             </div>
           </div>
           <div className="flex items-center gap-3">
+            {connectedAccount && (
+              <div className="flex items-center gap-1.5 text-xs text-emerald-400 bg-emerald-500/10 rounded-full px-3 py-1.5">
+                <Wallet className="w-3 h-3" />
+                {connectedAccount}
+              </div>
+            )}
             {autoLoop && (
               <div className="flex items-center gap-1.5 text-xs text-emerald-400 bg-emerald-500/10 rounded-full px-3 py-1.5">
                 <Timer className="w-3 h-3" />
@@ -427,6 +495,20 @@ export default function Home() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-full">
           {/* Left: Dashboard Panels */}
           <div className="lg:col-span-1 space-y-4 overflow-y-auto max-h-[calc(100vh-120px)]">
+            {/* Wallet Connection (Gap 1) */}
+            <WalletConnect
+              connectedAccount={connectedAccount}
+              onConnect={(id, data) => {
+                setConnectedAccount(id);
+                setWalletData(data);
+                fetchPositions();
+              }}
+              onDisconnect={() => {
+                setConnectedAccount(null);
+                setWalletData(null);
+              }}
+            />
+
             {/* Keeper Controls */}
             <KeeperPanel
               result={keeperResult}
@@ -457,6 +539,24 @@ export default function Home() {
             {keeperHistory.length > 0 && (
               <DecisionHistoryCard history={keeperHistory} />
             )}
+
+            {/* Strategy Config (Gap 5 + Gap 4 Price Alerts) */}
+            <StrategyConfigPanel
+              config={strategyConfig}
+              onConfigChange={setStrategyConfig}
+              priceAlerts={priceAlerts}
+              onAddAlert={(alert) => setPriceAlerts((prev) => [...prev, alert])}
+              onRemoveAlert={(id) =>
+                setPriceAlerts((prev) => prev.filter((a) => a.id !== id))
+              }
+              onToggleAlert={(id) =>
+                setPriceAlerts((prev) =>
+                  prev.map((a) =>
+                    a.id === id ? { ...a, active: !a.active } : a
+                  )
+                )
+              }
+            />
 
             {/* Agent Status */}
             <div className="rounded-xl border border-gray-800/60 bg-gray-900/40 p-4 card-glow">
@@ -593,19 +693,7 @@ export default function Home() {
                 </div>
               ))}
 
-              {isLoading && (
-                <div className="flex gap-3">
-                  <div className="w-7 h-7 rounded-lg bg-emerald-500/10 flex items-center justify-center flex-shrink-0">
-                    <Brain className="w-4 h-4 text-emerald-400" />
-                  </div>
-                  <div className="bg-gray-800/50 border border-gray-700/30 rounded-xl px-4 py-3">
-                    <div className="flex items-center gap-2 text-sm text-gray-400">
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                      Analyzing markets & executing...
-                    </div>
-                  </div>
-                </div>
-              )}
+              {isLoading && <AgentThinking />}
 
               <div ref={messagesEndRef} />
             </div>
@@ -662,6 +750,64 @@ export default function Home() {
           </div>
         </div>
       </main>
+
+      {/* Transaction Confirmation Modal (Gap 2) */}
+      {pendingTx && (
+        <TransactionModal
+          transaction={pendingTx}
+          onClose={() => setPendingTx(null)}
+          onResult={(result) => {
+            setLastTxResult(result);
+            setPendingTx(null);
+            // Auto-clear toast after 8 seconds
+            setTimeout(() => setLastTxResult(null), 8000);
+          }}
+        />
+      )}
+
+      {/* Transaction Result Toast */}
+      {lastTxResult && (
+        <div className="fixed bottom-4 right-4 z-50 animate-slide-up">
+          <div
+            className={`rounded-xl border px-4 py-3 shadow-2xl backdrop-blur-sm flex items-center gap-3 ${
+              lastTxResult.success
+                ? "bg-emerald-900/90 border-emerald-500/30 text-emerald-300"
+                : "bg-red-900/90 border-red-500/30 text-red-300"
+            }`}
+          >
+            {lastTxResult.success ? (
+              <CheckCircle className="w-4 h-4 flex-shrink-0" />
+            ) : (
+              <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+            )}
+            <div className="text-xs">
+              <p className="font-medium">
+                {lastTxResult.action.replace(/_/g, " ")}{" "}
+                {lastTxResult.success ? "Executed" : "Failed"}
+              </p>
+              {lastTxResult.txId && (
+                <a
+                  href={`https://hashscan.io/testnet/transaction/${lastTxResult.txId}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-emerald-400 hover:text-emerald-300 flex items-center gap-1 mt-0.5"
+                >
+                  View on HashScan <ExternalLink className="w-3 h-3" />
+                </a>
+              )}
+              {lastTxResult.error && (
+                <p className="text-red-400 mt-0.5">{lastTxResult.error}</p>
+              )}
+            </div>
+            <button
+              onClick={() => setLastTxResult(null)}
+              className="text-gray-500 hover:text-gray-300 ml-2"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
