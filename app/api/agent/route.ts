@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { chat, getToolNames, type MarketContext } from "@/lib/agent";
 import { analyzeSentiment } from "@/lib/sentiment";
 import { getBonzoMarkets } from "@/lib/bonzo";
+import { buildRAGContext } from "@/lib/rag";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -86,7 +87,13 @@ export async function POST(req: NextRequest) {
     // Gather live context in parallel with nothing (fast, cached)
     const context = await gatherContext();
 
-    const result = await chat(message, threadId || "default", context);
+    // Inject RAG knowledge base context for DeFi strategy questions
+    const ragContext = buildRAGContext(message);
+
+    // Enhance message with RAG if relevant knowledge found
+    const enrichedMessage = ragContext ? `${message}\n${ragContext}` : message;
+
+    const result = await chat(enrichedMessage, threadId || "default", context);
 
     return NextResponse.json({
       success: true,
@@ -95,6 +102,13 @@ export async function POST(req: NextRequest) {
         toolCalls: result.toolCalls,
         threadId: threadId || "default",
         tools: getToolNames(),
+        sentiment: context.sentiment
+          ? {
+              score: context.sentiment.score,
+              signal: context.sentiment.signal,
+              confidence: context.sentiment.confidence,
+            }
+          : undefined,
       },
     });
   } catch (error: any) {

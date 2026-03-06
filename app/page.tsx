@@ -36,6 +36,21 @@ const HCSTimeline = dynamic(
   { ssr: false }
 );
 
+// Import chart detection (pure logic, no SSR issue)
+import { detectCharts, type ChartType } from "@/components/InlineCharts";
+// Dynamic import for chart rendering components
+const InlineChartRenderer = dynamic(
+  () => import("@/components/InlineCharts").then((mod) => ({
+    default: mod.InlineChart,
+  })),
+  { ssr: false }
+);
+// Markdown renderer for beautiful agent messages
+const MarkdownMessage = dynamic(
+  () => import("@/components/MarkdownMessage"),
+  { ssr: false }
+);
+
 // ============================================
 // Types
 // ============================================
@@ -71,6 +86,8 @@ interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   toolCalls?: { tool: string; output: string }[];
+  charts?: ChartType[];
+  sentiment?: { score: number; signal: string; confidence: number };
   timestamp: Date;
 }
 
@@ -132,11 +149,35 @@ export default function Home() {
     {
       id: "welcome",
       role: "assistant",
-      content:
-        "Welcome to VaultMind! I'm your AI DeFi keeper agent on Hedera. I can monitor Bonzo Finance markets, analyze sentiment, and manage vault positions autonomously. Try asking me:\n\n• \"What are the current Bonzo market rates?\"\n• \"What's the market sentiment right now?\"\n• \"Should I deposit HBAR into Bonzo?\"\n• \"Check my HBAR balance\"",
+      content: `### 👋 Welcome to **VaultMind**
+  
+  I'm your **AI DeFi Keeper Agent on Hedera**.  
+  I continuously monitor **Bonzo Finance** and **SaucerSwap** markets, analyze sentiment, and manage vault positions autonomously.
+  
+  ---
+  
+  ### 🚀 Try asking me:
+  
+  - **“Show my portfolio breakdown”**  
+    _Interactive pie chart_
+  
+  - **“How’s the market sentiment?”**  
+    _Live Fear & Greed gauge_
+  
+  - **“Compare APYs across platforms”**  
+    _Bonzo vs SaucerSwap_
+  
+  - **“Show correlation matrix”**  
+    _Asset correlation heat map_
+  
+  - **“Show risk vs return”**  
+    _Scatter plot analysis_
+  
+  - **“Show DeFi opportunities”**  
+    _Yield heat map_`,
       timestamp: new Date(),
     },
-  ]);
+  ]);  
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [marketLoading, setMarketLoading] = useState(true);
@@ -301,6 +342,13 @@ export default function Home() {
 
       const json = await res.json();
 
+      // Detect charts from both user query and agent response
+      const chartsFromQuery = detectCharts(userMessage.content);
+      const chartsFromResponse = json.success
+        ? detectCharts(json.data.response)
+        : [];
+      const allCharts = Array.from(new Set([...chartsFromQuery, ...chartsFromResponse])) as ChartType[];
+
       const assistantMessage: ChatMessage = {
         id: (Date.now() + 1).toString(),
         role: "assistant",
@@ -308,6 +356,8 @@ export default function Home() {
           ? json.data.response
           : `Error: ${json.error}`,
         toolCalls: json.data?.toolCalls,
+        charts: allCharts.length > 0 ? allCharts : undefined,
+        sentiment: json.data?.sentiment,
         timestamp: new Date(),
       };
 
@@ -496,13 +546,29 @@ export default function Home() {
                     </div>
                   )}
                   <div
-                    className={`max-w-[80%] rounded-xl px-4 py-3 text-sm leading-relaxed ${
+                    className={`rounded-xl px-4 py-3 text-sm leading-relaxed ${
                       msg.role === "user"
-                        ? "bg-emerald-600/20 text-gray-200 border border-emerald-500/20"
-                        : "bg-gray-800/50 text-gray-300 border border-gray-700/30"
+                        ? "max-w-[75%] bg-emerald-600/20 text-gray-200 border border-emerald-500/20"
+                        : `${msg.charts?.length ? "max-w-[95%] w-full" : "max-w-[85%]"} bg-gray-800/50 text-gray-300 border border-gray-700/30`
                     }`}
                   >
-                    <div className="whitespace-pre-wrap">{msg.content}</div>
+                    {msg.role === "assistant" ? (
+                      <MarkdownMessage content={msg.content} />
+                    ) : (
+                      <div className="whitespace-pre-wrap">{msg.content}</div>
+                    )}
+                    {/* Inline Charts — full width */}
+                    {msg.charts && msg.charts.length > 0 && (
+                      <div className="mt-3 -mx-1 space-y-3">
+                        {msg.charts.map((chartType) => (
+                          <InlineChartRenderer
+                            key={chartType}
+                            type={chartType}
+                            sentiment={msg.sentiment}
+                          />
+                        ))}
+                      </div>
+                    )}
                     {msg.toolCalls && msg.toolCalls.length > 0 && (
                       <div className="mt-2 pt-2 border-t border-gray-700/30">
                         <p className="text-[10px] text-gray-500 mb-1">
@@ -565,13 +631,7 @@ export default function Home() {
                 </button>
               </div>
               <div className="flex gap-2 mt-2 flex-wrap">
-                {[
-                  "Check market rates",
-                  "Analyze sentiment",
-                  "Check my balance",
-                  "Deposit 100 HBAR",
-                  "What are my positions?",
-                ].map((q) => (
+                {getDynamicSuggestions(messages).map((q) => (
                   <button
                     key={q}
                     onClick={() => setInput(q)}
@@ -607,6 +667,82 @@ export default function Home() {
 }
 
 // ── Helpers ──
+
+/** Dynamic context-aware suggestions that change based on conversation */
+function getDynamicSuggestions(messages: ChatMessage[]): string[] {
+  const lastMsg = messages[messages.length - 1];
+  const msgCount = messages.length;
+  const lastContent = lastMsg?.content?.toLowerCase() || "";
+
+  // Phase-based suggestions — evolve as conversation progresses
+  const allSuggestions = [
+    // Getting started
+    [
+      "Show my portfolio breakdown",
+      "How's the market sentiment?",
+      "What are the best yields right now?",
+    ],
+    // After first response — deeper analysis
+    [
+      "Show correlation matrix",
+      "Compare APYs across platforms",
+      "Show DeFi opportunities heat map",
+    ],
+    // Strategy phase
+    [
+      "Show risk vs return analysis",
+      "What's the best lending loop strategy?",
+      "Should I concentrate liquidity?",
+    ],
+    // Action phase
+    [
+      "Deposit 100 HBAR into Bonzo",
+      "Run keeper dry run",
+      "Show price chart for HBAR",
+    ],
+    // Monitoring phase
+    [
+      "Check my health factor",
+      "What's the market mood?",
+      "Where can I invest for higher yield?",
+    ],
+  ];
+
+  // Pick suggestions based on conversation depth
+  const phase = Math.min(Math.floor(msgCount / 3), allSuggestions.length - 1);
+
+  // If last message mentioned specific topics, show related follow-ups
+  if (lastContent.includes("portfolio") || lastContent.includes("holdings")) {
+    return [
+      "Show correlation between my assets",
+      "What's my risk/return profile?",
+      "Compare yields I could earn",
+    ];
+  }
+  if (lastContent.includes("sentiment") || lastContent.includes("bearish") || lastContent.includes("bullish")) {
+    return [
+      "Show DeFi heat map",
+      "Should I harvest or hold?",
+      "What's the volatility right now?",
+    ];
+  }
+  if (lastContent.includes("apy") || lastContent.includes("yield") || lastContent.includes("rate")) {
+    return [
+      "Show heat map of opportunities",
+      "Explain the Bonzo lending loop",
+      "Deposit into the best yield",
+    ];
+  }
+  if (lastContent.includes("deposit") || lastContent.includes("withdraw")) {
+    return [
+      "Check my positions",
+      "What's my health factor?",
+      "Run keeper to optimize",
+    ];
+  }
+
+  return allSuggestions[phase];
+}
 
 function formatCountdown(seconds: number): string {
   const m = Math.floor(seconds / 60);
