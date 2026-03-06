@@ -1,11 +1,18 @@
 // ============================================
-// app/api/execute/route.ts
-// Real Transaction Execution Endpoint
+// /api/execute — Real Transaction Execution
 // Direct contract calls to Bonzo Finance
+// HBAR → WETHGateway | ERC20 → LendingPool
+// Every action = real on-chain transaction
 // ============================================
 
 import { NextRequest, NextResponse } from "next/server";
-import { executeDeposit, type ExecutionResult } from "@/lib/bonzo-execute";
+import {
+  executeDeposit,
+  executeWithdraw,
+  executeBorrow,
+  executeRepay,
+  type ExecutionResult,
+} from "@/lib/bonzo-execute";
 import {
   ensureAuditTopic,
   logDecisionToHCS,
@@ -15,6 +22,9 @@ import {
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
+/**
+ * Normalize token symbol from user input
+ */
 function normalizeToken(raw: string): string {
   const upper = raw.toUpperCase().trim();
   if (upper.includes("-") || upper.includes("/")) {
@@ -49,6 +59,7 @@ export async function POST(req: NextRequest) {
     let result: ExecutionResult;
 
     switch (action) {
+      // ── Lending: Supply / Deposit ──
       case "supply":
       case "deposit":
       case "vault_deposit": {
@@ -62,6 +73,36 @@ export async function POST(req: NextRequest) {
         break;
       }
 
+      // ── Lending: Withdraw ──
+      case "withdraw":
+      case "vault_withdraw": {
+        result = await executeWithdraw(token, amount > 0 ? amount : undefined);
+        break;
+      }
+
+      // ── Lending: Borrow ──
+      case "borrow": {
+        if (amount <= 0) {
+          return NextResponse.json(
+            { success: false, error: "Borrow amount must be > 0" },
+            { status: 400 }
+          );
+        }
+        result = await executeBorrow(token, amount, rateMode);
+        break;
+      }
+
+      // ── Lending: Repay ──
+      case "repay": {
+        result = await executeRepay(
+          token,
+          amount > 0 ? amount : undefined,
+          rateMode
+        );
+        break;
+      }
+
+      // ── Vault: Harvest ──
       case "vault_harvest": {
         result = {
           success: true,
@@ -70,6 +111,34 @@ export async function POST(req: NextRequest) {
           hashScanLinks: [],
           details: `Bonzo Lend interest accrues automatically — no harvest transaction needed. Your aToken balance increases every second. For Beefy vault strategies (when deployed), harvest() would compound LP rewards.`,
           toolsUsed: ["interest-accrual-check"],
+        };
+        break;
+      }
+
+      // ── Vault: Switch ──
+      case "vault_switch": {
+        const withdrawResult = await executeWithdraw(token);
+        if (!withdrawResult.success) {
+          result = withdrawResult;
+          break;
+        }
+        const depositResult = await executeDeposit(
+          token,
+          amount > 0 ? amount : 100
+        );
+        result = {
+          success: depositResult.success,
+          action: "switch",
+          txIds: [...withdrawResult.txIds, ...depositResult.txIds],
+          hashScanLinks: [
+            ...withdrawResult.hashScanLinks,
+            ...depositResult.hashScanLinks,
+          ],
+          details: `Vault switch: Withdrew ${token} → Deposited into ${
+            params.target || "new strategy"
+          }. ${depositResult.details}`,
+          error: depositResult.error,
+          toolsUsed: [...withdrawResult.toolsUsed, ...depositResult.toolsUsed],
         };
         break;
       }
@@ -88,7 +157,7 @@ export async function POST(req: NextRequest) {
     console.log(`[Execute] Tools: ${result.toolsUsed.join(", ")}`);
     console.log(`[Execute] Completed in ${elapsed}ms`);
 
-    // Log to HCS
+    // Log to HCS for immutable audit trail
     let hcsLog = null;
     try {
       const topicId = await ensureAuditTopic();

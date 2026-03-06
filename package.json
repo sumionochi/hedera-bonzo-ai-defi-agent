@@ -2,11 +2,14 @@
   "name": "frontend",
   "version": "0.1.0",
   "private": true,
-  "scripts": {
+ "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "setup": "node scripts/setup-account.js",
+    "test:deposit": "node scripts/test-deposit.js",
+    "postinstall": "cp node_modules/@bonzofinancelabs/hak-bonzo-plugin/bonzo-contracts.json ./bonzo-contracts.json 2>/dev/null || true"
   },
   "dependencies": {
     "@bonzofinancelabs/hak-bonzo-plugin": "^1.0.1",

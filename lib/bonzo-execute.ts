@@ -1,42 +1,44 @@
 // ============================================
-// lib/bonzo-execute.ts – Plugin addresses + revert reason extraction
+// VaultMind — Bonzo Finance Execution Layer
+// ============================================
+// Bonzo uses SaucerSwap's WHBAR contract for wrapping:
+//   - WHBAR Contract: 0.0.15057 (call deposit() here)
+//   - WHBAR Token:    0.0.15058 (the ERC20 token)
+//   - EVM address:    0x0000000000000000000000000000000000003ad2
+//
+// Flow for HBAR deposit:
+//   1. Associate account with WHBAR token 0.0.15058
+//   2. Call WHBAR contract 0.0.15057 deposit() with payable HBAR
+//   3. Approve WHBAR token for LendingPool
+//   4. Call LendingPool.deposit(WHBAR_addr, amount, onBehalfOf, 0)
 // ============================================
 
 import {
   ContractExecuteTransaction,
-  ContractCallQuery,
   ContractId,
   Hbar,
   AccountId,
   AccountInfoQuery,
   TokenAssociateTransaction,
   TokenId,
-  TransactionReceipt,
 } from "@hashgraph/sdk";
 import { Interface } from "@ethersproject/abi";
 import { getHederaClient } from "./hedera";
 
-// ------------------------------------------------------------------
-// Plugin addresses (verified by your /api/diagnose)
-// ------------------------------------------------------------------
-const LENDING_POOL_ADDRESS = "0x7710a96b01e02eD00768C3b39BfA7B4f1c128c62";
-const WETH_GATEWAY_ADDRESS = "0xA824820e35D6AE4D368153e83b7920B2DC3Cf964";
+// SaucerSwap WHBAR - used by Bonzo Finance
+const WHBAR_CONTRACT_ID = "0.0.15057";
+const WHBAR_TOKEN_HTS = "0.0.15058";
+const WHBAR_TOKEN_EVM = "0x0000000000000000000000000000000000003ad2";
 
-// Testnet HTS token mappings
-const TESTNET_TOKENS: Record<
+// Bonzo LendingPool from bonzo-contracts.json
+const LENDING_POOL_EVM = "0x7710a96b01e02eD00768C3b39BfA7B4f1c128c62";
+
+const TOKEN_MAP: Record<
   string,
   { evmAddr: string; htsId: string; decimals: number }
 > = {
-  HBAR: {
-    evmAddr: "0x0000000000000000000000000000000000003ad2",
-    htsId: "0.0.15058",
-    decimals: 8,
-  },
-  WHBAR: {
-    evmAddr: "0x0000000000000000000000000000000000003ad2",
-    htsId: "0.0.15058",
-    decimals: 8,
-  },
+  WHBAR: { evmAddr: WHBAR_TOKEN_EVM, htsId: WHBAR_TOKEN_HTS, decimals: 8 },
+  HBAR: { evmAddr: WHBAR_TOKEN_EVM, htsId: WHBAR_TOKEN_HTS, decimals: 8 },
   USDC: {
     evmAddr: "0x0000000000000000000000000000000000001549",
     htsId: "0.0.5449",
@@ -53,20 +55,19 @@ const TESTNET_TOKENS: Record<
     decimals: 6,
   },
   KARATE: {
-    evmAddr: "0x0000000000000000000000000000000000220ce5",
-    htsId: "0.0.2236901",
+    evmAddr: "0x00000000000000000000000000000000003991ed",
+    htsId: "0.0.3772909",
     decimals: 8,
   },
 };
 
-// ------------------------------------------------------------------
-// ABIs (verified signatures)
-// ------------------------------------------------------------------
-const WETH_GATEWAY_ABI = new Interface([
-  "function depositETH(address lendingPool, address onBehalfOf, uint16 referralCode) payable",
-  "function withdrawETH(address lendingPool, uint256 amount, address to)",
-  "function borrowETH(address lendingPool, uint256 amount, uint256 interestRateMode, uint16 referralCode)",
-  "function repayETH(address lendingPool, uint256 amount, uint256 rateMode, address onBehalfOf) payable",
+const WHBAR_ABI = new Interface([
+  "function deposit() payable",
+  "function withdraw(uint256 amount)",
+]);
+
+const ERC20_ABI = new Interface([
+  "function approve(address spender, uint256 amount) returns (bool)",
 ]);
 
 const LENDING_POOL_ABI = new Interface([
@@ -76,13 +77,6 @@ const LENDING_POOL_ABI = new Interface([
   "function repay(address asset, uint256 amount, uint256 rateMode, address onBehalfOf) returns (uint256)",
 ]);
 
-const ERC20_ABI = new Interface([
-  "function approve(address spender, uint256 amount) returns (bool)",
-]);
-
-// ------------------------------------------------------------------
-// Types
-// ------------------------------------------------------------------
 export interface ExecutionResult {
   success: boolean;
   action: string;
@@ -93,10 +87,7 @@ export interface ExecutionResult {
   toolsUsed: string[];
 }
 
-// ------------------------------------------------------------------
-// Helpers
-// ------------------------------------------------------------------
-function txIdToHashScan(txId: string): string {
+function txLink(txId: string): string {
   const parts = txId.split("@");
   if (parts.length === 2) {
     return `https://hashscan.io/testnet/transaction/${
@@ -106,13 +97,12 @@ function txIdToHashScan(txId: string): string {
   return `https://hashscan.io/testnet/transaction/${txId}`;
 }
 
-function toWei(amount: number, decimals: number): bigint {
-  return BigInt(Math.floor(amount * Math.pow(10, decimals)));
+function toSmallestUnit(amount: number, decimals: number): bigint {
+  return BigInt(Math.round(amount * Math.pow(10, decimals)));
 }
 
-function getTokenInfo(symbol: string) {
-  const upper = symbol.toUpperCase().trim();
-  return TESTNET_TOKENS[upper] || TESTNET_TOKENS.HBAR;
+function getToken(symbol: string) {
+  return TOKEN_MAP[symbol.toUpperCase().trim()] || TOKEN_MAP.WHBAR;
 }
 
 async function getEvmAddress(client: any, accountId: string): Promise<string> {
@@ -120,237 +110,386 @@ async function getEvmAddress(client: any, accountId: string): Promise<string> {
     const info = await new AccountInfoQuery()
       .setAccountId(AccountId.fromString(accountId))
       .execute(client);
-    const evm = info.contractAccountId;
-    if (typeof evm === "string" && evm.length > 0) {
-      return evm.startsWith("0x") ? evm : `0x${evm}`;
+    const evm = (info as any).evmAddress;
+    if (
+      typeof evm === "string" &&
+      evm.startsWith("0x") &&
+      evm.length === 42 &&
+      evm !== "0x0000000000000000000000000000000000000000"
+    ) {
+      return evm;
     }
-  } catch (e) {
-    console.warn(`[BonzoExec] EVM lookup failed for ${accountId}`);
-  }
+    const caid = info.contractAccountId;
+    if (typeof caid === "string" && caid.length > 0) {
+      return caid.startsWith("0x") ? caid : `0x${caid}`;
+    }
+  } catch {}
   return "0x" + AccountId.fromString(accountId).toSolidityAddress();
 }
 
-// ------------------------------------------------------------------
-// Token Association (required for HTS tokens like WHBAR)
-// ------------------------------------------------------------------
-const associatedTokensCache = new Set<string>();
+const assocCache = new Set<string>();
 
-async function ensureTokenAssociated(
+async function ensureAssociated(
   client: any,
   accountId: string,
-  tokenSymbol: string
+  htsId: string
 ): Promise<void> {
-  const token = getTokenInfo(tokenSymbol);
-  const cacheKey = `${accountId}:${token.htsId}`;
-  if (associatedTokensCache.has(cacheKey)) return;
-
+  const key = `${accountId}:${htsId}`;
+  if (assocCache.has(key)) return;
   try {
-    const info = await new AccountInfoQuery()
-      .setAccountId(AccountId.fromString(accountId))
-      .execute(client);
-
-    const tokenMap = (info as any).tokenRelationships;
-    const existingIds = new Set<string>();
-    if (tokenMap && tokenMap._map) {
-      for (const [k] of tokenMap._map) existingIds.add(k.toString());
-    }
-
-    if (existingIds.has(token.htsId)) {
-      associatedTokensCache.add(cacheKey);
-      console.log(`[BonzoExec] ${tokenSymbol} already associated`);
-      return;
-    }
-
-    console.log(`[BonzoExec] Associating ${tokenSymbol}...`);
+    console.log(`[BonzoExec] Associating ${htsId}...`);
     const tx = new TokenAssociateTransaction()
       .setAccountId(AccountId.fromString(accountId))
-      .setTokenIds([TokenId.fromString(token.htsId)]);
-
+      .setTokenIds([TokenId.fromString(htsId)]);
     const resp = await tx.execute(client);
     const receipt = await resp.getReceipt(client);
-    console.log(
-      `[BonzoExec] Association ${tokenSymbol}: ${receipt.status.toString()}`
-    );
-    associatedTokensCache.add(cacheKey);
+    console.log(`[BonzoExec] Association ${htsId}: ${receipt.status}`);
+    assocCache.add(key);
   } catch (e: any) {
-    if (e.message?.includes("TOKEN_ALREADY_ASSOCIATED")) {
-      associatedTokensCache.add(cacheKey);
-      return;
-    }
-    console.warn(`[BonzoExec] Association warning: ${e.message}`);
-  }
-}
-
-// ------------------------------------------------------------------
-// Revert reason extraction (works with Hedera ContractFunctionResult)
-// ------------------------------------------------------------------
-function extractRevertReason(receipt: TransactionReceipt): string | undefined {
-  // @ts-ignore – Hedera SDK includes contractFunctionResult
-  const result = receipt.contractFunctionResult;
-  if (!result) return undefined;
-
-  // If errorMessage is present, use it
-  if (result.errorMessage) return result.errorMessage;
-
-  // Otherwise try to decode revert reason from raw bytes
-  if (result.contractCallResult) {
-    const bytes = result.contractCallResult;
+    const msg = e.message || "";
     if (
-      bytes.length >= 4 &&
-      bytes[0] === 0x08 &&
-      bytes[1] === 0xc3 &&
-      bytes[2] === 0x79 &&
-      bytes[3] === 0xa0
+      msg.includes("TOKEN_ALREADY_ASSOCIATED") ||
+      msg.includes("ALREADY_ASSOCIATED")
     ) {
-      // That's the Error(string) selector; next 32 bytes are offset, then length, then string
-      // This is simplified – in practice you'd use ethers.utils.toUtf8String after parsing.
-      // We'll return a placeholder.
-      return "Custom error (see contract)";
+      console.log(`[BonzoExec] ${htsId} already associated`);
+      assocCache.add(key);
+    } else {
+      console.warn(`[BonzoExec] Association warning: ${msg.substring(0, 100)}`);
     }
   }
-  return undefined;
 }
 
-// ------------------------------------------------------------------
-// HBAR Deposit via Plugin WETHGateway
-// ------------------------------------------------------------------
-async function depositHBAR(amount: number): Promise<ExecutionResult> {
-  const client = getHederaClient();
-  const operatorId = client.operatorAccountId!.toString();
-  const onBehalfOf = await getEvmAddress(client, operatorId);
-
-  console.log(`[BonzoExec] depositETH: ${amount} HBAR via plugin WETHGateway`);
-  console.log(`[BonzoExec] LendingPool: ${LENDING_POOL_ADDRESS}`);
-  console.log(`[BonzoExec] WETHGateway: ${WETH_GATEWAY_ADDRESS}`);
-  console.log(`[BonzoExec] onBehalfOf: ${onBehalfOf}`);
-
-  const data = WETH_GATEWAY_ABI.encodeFunctionData("depositETH", [
-    LENDING_POOL_ADDRESS,
-    onBehalfOf,
-    0, // referralCode
-  ]);
-
+async function wrapHBAR(
+  client: any,
+  amountHbar: number
+): Promise<{ success: boolean; txId: string; error?: string }> {
+  console.log(
+    `[BonzoExec] Wrapping ${amountHbar} HBAR via SaucerSwap WHBAR contract ${WHBAR_CONTRACT_ID}`
+  );
+  const data = WHBAR_ABI.encodeFunctionData("deposit", []);
   const tx = new ContractExecuteTransaction()
-    .setContractId(ContractId.fromSolidityAddress(WETH_GATEWAY_ADDRESS))
-    .setGas(2_000_000) // Increased gas
-    .setPayableAmount(new Hbar(amount))
+    .setContractId(ContractId.fromString(WHBAR_CONTRACT_ID))
+    .setGas(300_000)
+    .setPayableAmount(new Hbar(amountHbar))
     .setFunctionParameters(Buffer.from(data.slice(2), "hex"))
-    .setMaxTransactionFee(new Hbar(10));
-
+    .setMaxTransactionFee(new Hbar(5));
   const resp = await tx.execute(client);
   const receipt = await resp.getReceipt(client);
   const txId = resp.transactionId.toString();
   const status = receipt.status.toString();
-  const revertReason = extractRevertReason(receipt);
-
-  console.log(
-    `[BonzoExec] depositETH result: ${status}, tx=${txId}, revert=${
-      revertReason || "none"
-    }`
-  );
-
+  console.log(`[BonzoExec] WHBAR.deposit() -> ${status} (tx: ${txId})`);
   return {
     success: status === "SUCCESS",
-    action: "deposit",
-    txIds: [txId],
-    hashScanLinks: [txIdToHashScan(txId)],
-    details: `Deposited ${amount} HBAR via plugin WETHGateway. Status: ${status}${
-      revertReason ? ` Revert: ${revertReason}` : ""
-    }`,
-    error:
-      status !== "SUCCESS"
-        ? `Transaction reverted${revertReason ? `: ${revertReason}` : ""}`
-        : undefined,
-    toolsUsed: ["WETHGateway.depositETH"],
+    txId,
+    error: status !== "SUCCESS" ? status : undefined,
   };
 }
 
-// ------------------------------------------------------------------
-// ERC20 Deposit (unchanged, but uses plugin LendingPool)
-// ------------------------------------------------------------------
-async function depositERC20(
+async function approveToken(
+  client: any,
+  tokenEvm: string,
+  spender: string,
+  amount: bigint
+): Promise<{ success: boolean; txId: string; error?: string }> {
+  console.log(`[BonzoExec] Approving ${tokenEvm} for ${spender}`);
+  const data = ERC20_ABI.encodeFunctionData("approve", [spender, amount]);
+  const tx = new ContractExecuteTransaction()
+    .setContractId(ContractId.fromSolidityAddress(tokenEvm))
+    .setGas(1_000_000)
+    .setFunctionParameters(Buffer.from(data.slice(2), "hex"))
+    .setMaxTransactionFee(new Hbar(5));
+  const resp = await tx.execute(client);
+  const receipt = await resp.getReceipt(client);
+  const txId = resp.transactionId.toString();
+  const status = receipt.status.toString();
+  console.log(`[BonzoExec] approve() -> ${status}`);
+  return {
+    success: status === "SUCCESS",
+    txId,
+    error: status !== "SUCCESS" ? status : undefined,
+  };
+}
+
+// ═══ DEPOSIT ═══
+export async function executeDeposit(
   tokenSymbol: string,
   amount: number
 ): Promise<ExecutionResult> {
   const client = getHederaClient();
   const operatorId = client.operatorAccountId!.toString();
   const onBehalfOf = await getEvmAddress(client, operatorId);
-  const token = getTokenInfo(tokenSymbol);
-  const amountWei = toWei(amount, token.decimals);
+  const isHbar = ["HBAR", "WHBAR"].includes(tokenSymbol.toUpperCase());
+  const token = getToken(tokenSymbol);
+  const amountWei = toSmallestUnit(amount, token.decimals);
   const txIds: string[] = [];
   const links: string[] = [];
   const tools: string[] = [];
 
-  await ensureTokenAssociated(client, operatorId, tokenSymbol);
+  console.log(`[BonzoExec] === DEPOSIT ${amount} ${tokenSymbol} ===`);
+  console.log(`[BonzoExec] Operator: ${operatorId}, onBehalfOf: ${onBehalfOf}`);
 
-  // Approve
-  const approveData = ERC20_ABI.encodeFunctionData("approve", [
-    LENDING_POOL_ADDRESS,
-    amountWei,
-  ]);
-  const approveTx = new ContractExecuteTransaction()
-    .setContractId(ContractId.fromSolidityAddress(token.evmAddr))
-    .setGas(1_000_000)
-    .setFunctionParameters(Buffer.from(approveData.slice(2), "hex"))
-    .setMaxTransactionFee(new Hbar(5));
-  const approveResp = await approveTx.execute(client);
-  await approveResp.getReceipt(client);
-  txIds.push(approveResp.transactionId.toString());
-  links.push(txIdToHashScan(approveResp.transactionId.toString()));
-  tools.push(`${tokenSymbol}.approve`);
+  try {
+    await ensureAssociated(client, operatorId, token.htsId);
 
-  // Deposit
-  const depositData = LENDING_POOL_ABI.encodeFunctionData("deposit", [
-    token.evmAddr,
-    amountWei,
-    onBehalfOf,
-    0,
-  ]);
-  const depositTx = new ContractExecuteTransaction()
-    .setContractId(ContractId.fromSolidityAddress(LENDING_POOL_ADDRESS))
-    .setGas(1_500_000)
-    .setFunctionParameters(Buffer.from(depositData.slice(2), "hex"))
-    .setMaxTransactionFee(new Hbar(10));
-  const depositResp = await depositTx.execute(client);
-  const depositReceipt = await depositResp.getReceipt(client);
-  txIds.push(depositResp.transactionId.toString());
-  links.push(txIdToHashScan(depositResp.transactionId.toString()));
-  tools.push("LendingPool.deposit");
+    if (isHbar) {
+      const wrap = await wrapHBAR(client, amount);
+      txIds.push(wrap.txId);
+      links.push(txLink(wrap.txId));
+      tools.push("SaucerSwap_WHBAR.deposit");
+      if (!wrap.success)
+        return {
+          success: false,
+          action: "deposit",
+          txIds,
+          hashScanLinks: links,
+          details: `WHBAR wrapping failed: ${wrap.error}`,
+          error: wrap.error,
+          toolsUsed: tools,
+        };
+    }
 
-  const status = depositReceipt.status.toString();
-  const revertReason = extractRevertReason(depositReceipt);
-  return {
-    success: status === "SUCCESS",
-    action: "deposit",
-    txIds,
-    hashScanLinks: links,
-    details: `Deposited ${amount} ${tokenSymbol}. Status: ${status}${
-      revertReason ? ` Revert: ${revertReason}` : ""
-    }`,
-    error:
-      status !== "SUCCESS"
-        ? `Deposit reverted${revertReason ? `: ${revertReason}` : ""}`
-        : undefined,
-    toolsUsed: tools,
-  };
+    const approve = await approveToken(
+      client,
+      token.evmAddr,
+      LENDING_POOL_EVM,
+      amountWei
+    );
+    txIds.push(approve.txId);
+    links.push(txLink(approve.txId));
+    tools.push(`ERC20.approve`);
+    if (!approve.success)
+      return {
+        success: false,
+        action: "deposit",
+        txIds,
+        hashScanLinks: links,
+        details: `Approve failed: ${approve.error}`,
+        error: approve.error,
+        toolsUsed: tools,
+      };
+
+    const data = LENDING_POOL_ABI.encodeFunctionData("deposit", [
+      token.evmAddr,
+      amountWei,
+      onBehalfOf,
+      0,
+    ]);
+    const tx = new ContractExecuteTransaction()
+      .setContractId(ContractId.fromSolidityAddress(LENDING_POOL_EVM))
+      .setGas(1_000_000)
+      .setFunctionParameters(Buffer.from(data.slice(2), "hex"))
+      .setMaxTransactionFee(new Hbar(3));
+    const resp = await tx.execute(client);
+    const receipt = await resp.getReceipt(client);
+    const txId = resp.transactionId.toString();
+    const status = receipt.status.toString();
+    txIds.push(txId);
+    links.push(txLink(txId));
+    tools.push("LendingPool.deposit");
+
+    return {
+      success: status === "SUCCESS",
+      action: "deposit",
+      txIds,
+      hashScanLinks: links,
+      details:
+        status === "SUCCESS"
+          ? `Deposited ${amount} ${tokenSymbol} to Bonzo Finance.${
+              isHbar ? " HBAR wrapped to WHBAR via SaucerSwap." : ""
+            }`
+          : `Deposit failed at LendingPool.deposit: ${status}`,
+      error: status !== "SUCCESS" ? status : undefined,
+      toolsUsed: tools,
+    };
+  } catch (e: any) {
+    return {
+      success: false,
+      action: "deposit",
+      txIds,
+      hashScanLinks: links,
+      details: `Error: ${e.message}`,
+      error: e.message,
+      toolsUsed: tools,
+    };
+  }
 }
 
-// ------------------------------------------------------------------
-// Public API
-// ------------------------------------------------------------------
-function isHBAR(symbol: string): boolean {
-  const upper = symbol.toUpperCase().trim();
-  return upper === "HBAR" || upper === "WHBAR";
-}
-
-export async function executeDeposit(
+// ═══ WITHDRAW ═══
+export async function executeWithdraw(
   tokenSymbol: string,
-  amount: number
+  amount?: number
 ): Promise<ExecutionResult> {
-  return isHBAR(tokenSymbol)
-    ? depositHBAR(amount)
-    : depositERC20(tokenSymbol, amount);
+  const client = getHederaClient();
+  const operatorId = client.operatorAccountId!.toString();
+  const toAddr = await getEvmAddress(client, operatorId);
+  const token = getToken(tokenSymbol);
+  const maxUint = BigInt(
+    "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  );
+  const amountWei = amount ? toSmallestUnit(amount, token.decimals) : maxUint;
+  try {
+    const data = LENDING_POOL_ABI.encodeFunctionData("withdraw", [
+      token.evmAddr,
+      amountWei,
+      toAddr,
+    ]);
+    const tx = new ContractExecuteTransaction()
+      .setContractId(ContractId.fromSolidityAddress(LENDING_POOL_EVM))
+      .setGas(1_000_000)
+      .setFunctionParameters(Buffer.from(data.slice(2), "hex"))
+      .setMaxTransactionFee(new Hbar(3));
+    const resp = await tx.execute(client);
+    const receipt = await resp.getReceipt(client);
+    const txId = resp.transactionId.toString();
+    const status = receipt.status.toString();
+    return {
+      success: status === "SUCCESS",
+      action: "withdraw",
+      txIds: [txId],
+      hashScanLinks: [txLink(txId)],
+      details:
+        status === "SUCCESS"
+          ? `Withdrew ${amount || "all"} ${tokenSymbol} from Bonzo Finance.`
+          : `Withdraw failed: ${status}`,
+      error: status !== "SUCCESS" ? status : undefined,
+      toolsUsed: ["LendingPool.withdraw"],
+    };
+  } catch (e: any) {
+    return {
+      success: false,
+      action: "withdraw",
+      txIds: [],
+      hashScanLinks: [],
+      details: `Error: ${e.message}`,
+      error: e.message,
+      toolsUsed: [],
+    };
+  }
 }
 
-// Other functions (withdraw, borrow, repay) remain similar – update addresses accordingly.
-// (Omitted for brevity but follow the same pattern.)
+// ═══ BORROW ═══
+export async function executeBorrow(
+  tokenSymbol: string,
+  amount: number,
+  rateMode = "variable"
+): Promise<ExecutionResult> {
+  const client = getHederaClient();
+  const operatorId = client.operatorAccountId!.toString();
+  const onBehalfOf = await getEvmAddress(client, operatorId);
+  const token = getToken(tokenSymbol);
+  const amountWei = toSmallestUnit(amount, token.decimals);
+  const rate = rateMode === "stable" ? 1 : 2;
+  try {
+    await ensureAssociated(client, operatorId, token.htsId);
+    const data = LENDING_POOL_ABI.encodeFunctionData("borrow", [
+      token.evmAddr,
+      amountWei,
+      rate,
+      0,
+      onBehalfOf,
+    ]);
+    const tx = new ContractExecuteTransaction()
+      .setContractId(ContractId.fromSolidityAddress(LENDING_POOL_EVM))
+      .setGas(1_000_000)
+      .setFunctionParameters(Buffer.from(data.slice(2), "hex"))
+      .setMaxTransactionFee(new Hbar(3));
+    const resp = await tx.execute(client);
+    const receipt = await resp.getReceipt(client);
+    const txId = resp.transactionId.toString();
+    const status = receipt.status.toString();
+    return {
+      success: status === "SUCCESS",
+      action: "borrow",
+      txIds: [txId],
+      hashScanLinks: [txLink(txId)],
+      details:
+        status === "SUCCESS"
+          ? `Borrowed ${amount} ${tokenSymbol} (${rateMode}) from Bonzo Finance.`
+          : `Borrow failed: ${status}`,
+      error: status !== "SUCCESS" ? status : undefined,
+      toolsUsed: ["LendingPool.borrow"],
+    };
+  } catch (e: any) {
+    return {
+      success: false,
+      action: "borrow",
+      txIds: [],
+      hashScanLinks: [],
+      details: `Error: ${e.message}`,
+      error: e.message,
+      toolsUsed: [],
+    };
+  }
+}
+
+// ═══ REPAY ═══
+export async function executeRepay(
+  tokenSymbol: string,
+  amount?: number,
+  rateMode = "variable"
+): Promise<ExecutionResult> {
+  const client = getHederaClient();
+  const operatorId = client.operatorAccountId!.toString();
+  const onBehalfOf = await getEvmAddress(client, operatorId);
+  const token = getToken(tokenSymbol);
+  const rate = rateMode === "stable" ? 1 : 2;
+  const maxUint = BigInt(
+    "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  );
+  const amountWei = amount ? toSmallestUnit(amount, token.decimals) : maxUint;
+  const txIds: string[] = [];
+  const links: string[] = [];
+  const tools: string[] = [];
+  try {
+    const approve = await approveToken(
+      client,
+      token.evmAddr,
+      LENDING_POOL_EVM,
+      maxUint
+    );
+    txIds.push(approve.txId);
+    links.push(txLink(approve.txId));
+    tools.push("ERC20.approve");
+    const data = LENDING_POOL_ABI.encodeFunctionData("repay", [
+      token.evmAddr,
+      amountWei,
+      rate,
+      onBehalfOf,
+    ]);
+    const tx = new ContractExecuteTransaction()
+      .setContractId(ContractId.fromSolidityAddress(LENDING_POOL_EVM))
+      .setGas(1_000_000)
+      .setFunctionParameters(Buffer.from(data.slice(2), "hex"))
+      .setMaxTransactionFee(new Hbar(3));
+    const resp = await tx.execute(client);
+    const receipt = await resp.getReceipt(client);
+    txIds.push(resp.transactionId.toString());
+    links.push(txLink(resp.transactionId.toString()));
+    tools.push("LendingPool.repay");
+    const status = receipt.status.toString();
+    return {
+      success: status === "SUCCESS",
+      action: "repay",
+      txIds,
+      hashScanLinks: links,
+      details:
+        status === "SUCCESS"
+          ? `Repaid ${
+              amount || "all"
+            } ${tokenSymbol} (${rateMode}) on Bonzo Finance.`
+          : `Repay failed: ${status}`,
+      error: status !== "SUCCESS" ? status : undefined,
+      toolsUsed: tools,
+    };
+  } catch (e: any) {
+    return {
+      success: false,
+      action: "repay",
+      txIds,
+      hashScanLinks: links,
+      details: `Error: ${e.message}`,
+      error: e.message,
+      toolsUsed: tools,
+    };
+  }
+}
