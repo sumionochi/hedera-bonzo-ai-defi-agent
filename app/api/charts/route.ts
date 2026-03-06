@@ -171,13 +171,72 @@ export async function GET(req: NextRequest) {
       case "ohlcv": {
         const poolId = parseInt(req.nextUrl.searchParams.get("poolId") || "2");
         const days = parseInt(req.nextUrl.searchParams.get("days") || "30");
-        // Use cached OHLCV data (auto-fetches if stale)
-        const bars = await getCachedOHLCV(poolId, "DAY", days);
-        const indicators = await getTechnicalIndicators(poolId);
+
+        // Try SaucerSwap first
+        let bars = await getCachedOHLCV(poolId, "DAY", days);
+        let indicators = null;
+        let source = "SaucerSwap";
+
+        // Fallback to CoinGecko if SaucerSwap returns no data
+        if (!bars || bars.length === 0) {
+          try {
+            const cgRes = await fetch(
+              `https://api.coingecko.com/api/v3/coins/hedera-hashgraph/ohlc?vs_currency=usd&days=${days}`,
+              { next: { revalidate: 3600 } }
+            );
+            if (cgRes.ok) {
+              const ohlc: number[][] = await cgRes.json();
+              if (Array.isArray(ohlc) && ohlc.length > 0) {
+                // CoinGecko returns: [timestamp, open, high, low, close]
+                // Aggregate 4-hourly candles into daily bars
+                const dailyMap = new Map<string, any>();
+                for (const [ts, open, high, low, close] of ohlc) {
+                  const day = new Date(ts).toISOString().split("T")[0];
+                  const existing = dailyMap.get(day);
+                  if (existing) {
+                    existing.high = Math.max(existing.high, high);
+                    existing.low = Math.min(existing.low, low);
+                    existing.close = close;
+                  } else {
+                    dailyMap.set(day, {
+                      timestamp: ts,
+                      open,
+                      high,
+                      low,
+                      close,
+                      volume: 0,
+                      volumeUsd: 0,
+                      liquidityUsd: 0,
+                    });
+                  }
+                }
+                bars = Array.from(dailyMap.values());
+                source = "CoinGecko";
+              }
+            }
+          } catch (e: any) {
+            console.warn(
+              "[Charts/ohlcv] CoinGecko fallback failed:",
+              e.message
+            );
+          }
+        }
+
+        if (bars.length > 0) {
+          try {
+            indicators = await getTechnicalIndicators(poolId);
+          } catch {}
+        }
 
         return NextResponse.json({
           success: true,
-          data: { bars, indicators, poolId, cached: true },
+          data: {
+            bars,
+            indicators,
+            poolId,
+            source,
+            cached: source === "SaucerSwap",
+          },
         });
       }
 

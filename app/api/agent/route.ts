@@ -54,7 +54,7 @@ async function gatherContext(): Promise<MarketContext> {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { message, threadId, connectedAccount } = body;
+    const { message, threadId, connectedAccount, strategyConfig } = body;
 
     if (!message || typeof message !== "string") {
       return NextResponse.json(
@@ -89,8 +89,6 @@ export async function POST(req: NextRequest) {
     const context = await gatherContext();
 
     // Inject the user's connected wallet so the agent analyzes the right account
-    // The operator (HEDERA_ACCOUNT_ID) is for signing transactions
-    // The connectedAccount is the user's actual wallet to analyze
     const userAccountId = connectedAccount || process.env.HEDERA_ACCOUNT_ID;
     const walletContext = `\n\n[USER WALLET]\nThe user's connected wallet is ${userAccountId}. When analyzing portfolio, positions, balances, or account data, ALWAYS use account ${userAccountId} — NOT the operator account. The operator account is only for signing transactions.`;
 
@@ -104,8 +102,31 @@ export async function POST(req: NextRequest) {
       vaultContext = "\n\n[BONZO VAULT LIVE DATA]\n" + getVaultsSummary(vaults);
     } catch {}
 
-    // Enhance message with wallet identity + RAG + vault context
-    const enrichedMessage = [message, walletContext, ragContext, vaultContext]
+    // Inject active strategy configuration so agent references current policy
+    let strategyContext = "";
+    if (strategyConfig) {
+      strategyContext =
+        `\n\n[ACTIVE STRATEGY CONFIG]\nThe user has configured these keeper parameters — reference them when explaining decisions:\n` +
+        `• Bearish threshold: ${strategyConfig.bearishThreshold} (harvest when sentiment below this)\n` +
+        `• Bullish threshold: ${strategyConfig.bullishThreshold} (accumulate when above this)\n` +
+        `• Confidence minimum: ${(
+          strategyConfig.confidenceMinimum * 100
+        ).toFixed(0)}% (don't act below this)\n` +
+        `• HF danger: ${strategyConfig.healthFactorDanger} (emergency repay below this)\n` +
+        `• HF target: ${strategyConfig.healthFactorTarget} (safe zone target)\n` +
+        `• High volatility threshold: ${strategyConfig.highVolatilityThreshold}% (exit to stable above this)\n` +
+        `• Min yield differential: ${strategyConfig.minYieldDifferential}% (rebalance above this gap)\n` +
+        `When explaining keeper decisions, ALWAYS reference the user's active thresholds, e.g. "Using your bearish threshold of ${strategyConfig.bearishThreshold}, I decided to..."`;
+    }
+
+    // Enhance message with wallet identity + RAG + vault + strategy context
+    const enrichedMessage = [
+      message,
+      walletContext,
+      ragContext,
+      vaultContext,
+      strategyContext,
+    ]
       .filter(Boolean)
       .join("\n");
 

@@ -243,14 +243,14 @@ function DecisionEntry({ decision }: { decision: HCSDecision }) {
 }
 
 // Main component
-export default function HCSTimeline() {
+export default function HCSTimeline({ refreshTrigger }: { refreshTrigger?: number }) {
   const [topicId, setTopicId] = useState<string | null>(null);
   const [decisions, setDecisions] = useState<HCSDecision[]>([]);
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Try to load topic from env (passed via keeper results)
+  // Try to load topic from env (passed via keeper results) — refetch on refreshTrigger change
   useEffect(() => {
     const stored = typeof window !== "undefined"
       ? localStorage.getItem("vaultmind_hcs_topic")
@@ -258,8 +258,19 @@ export default function HCSTimeline() {
     if (stored) {
       setTopicId(stored);
       fetchDecisions(stored);
+    } else {
+      // Try the API which can auto-detect from env
+      fetch("/api/hcs?limit=50").then(r => r.json()).then(j => {
+        if (j.success && j.data?.topicId) {
+          setTopicId(j.data.topicId);
+          setDecisions(j.data.decisions || []);
+          if (typeof window !== "undefined") {
+            localStorage.setItem("vaultmind_hcs_topic", j.data.topicId);
+          }
+        }
+      }).catch(() => {});
     }
-  }, []);
+  }, [refreshTrigger]);
 
   async function createTopic() {
     setCreating(true);
@@ -402,18 +413,23 @@ export default function HCSTimeline() {
       </div>
 
       {/* Topic info */}
-      <div className="flex items-center gap-2 mb-4 p-2 bg-gray-800/40 rounded-lg text-[11px]">
-        <CheckCircle className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0" />
-        <span className="text-gray-400">Topic:</span>
-        <span className="text-gray-200 font-mono">{topicId}</span>
-        <a
-          href={`https://hashscan.io/testnet/topic/${topicId}`}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="ml-auto text-emerald-400/60 hover:text-emerald-400 flex items-center gap-0.5"
-        >
-          HashScan <ExternalLink className="w-3 h-3" />
-        </a>
+      <div className="mb-4 p-2.5 bg-gray-800/40 rounded-lg space-y-1.5">
+        <div className="flex items-center gap-2 text-[11px]">
+          <CheckCircle className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0" />
+          <span className="text-gray-500">Audit Topic:</span>
+          <span className="text-gray-200 font-mono">{topicId}</span>
+          <a
+            href={`https://hashscan.io/testnet/topic/${topicId}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="ml-auto text-emerald-400/60 hover:text-emerald-400 flex items-center gap-0.5"
+          >
+            HashScan <ExternalLink className="w-3 h-3" />
+          </a>
+        </div>
+        <p className="text-[10px] text-gray-600 pl-5">
+          This is the HCS topic where keeper decisions are logged immutably on Hedera. Each entry is verifiable on HashScan.
+        </p>
       </div>
 
       {/* Error */}

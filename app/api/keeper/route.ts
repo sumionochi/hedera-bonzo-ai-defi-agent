@@ -116,23 +116,49 @@ export async function POST(req: NextRequest) {
       `[API/keeper] Custom keeper cycle (execute: ${execute})`,
       config
     );
-    const result = await runKeeperCycle(config, execute);
+
+    // Run both keepers in parallel (same as GET handler)
+    const [lendResult, vaultResult] = await Promise.all([
+      runKeeperCycle(config, execute),
+      (async () => {
+        try {
+          const [vaults, sentiment] = await Promise.all([
+            getVaultsWithLiveData(),
+            analyzeSentiment(),
+          ]);
+          const ctx: VaultKeeperContext = {
+            vaults,
+            sentimentScore: sentiment.score,
+            volatility: sentiment.dataPoints.volatility,
+            hbarPrice: sentiment.dataPoints.hbarPrice,
+            fearGreedIndex: sentiment.dataPoints.fearGreedValue,
+            userHbarBalance: 1000,
+            userPositions: [],
+          };
+          return makeVaultDecision(ctx);
+        } catch (e: any) {
+          console.warn("[API/keeper] Vault decision error:", e.message);
+          return null;
+        }
+      })(),
+    ]);
 
     return NextResponse.json({
       success: true,
       data: {
-        decision: result.decision,
+        decision: lendResult.decision,
         sentiment: {
-          score: result.sentiment.score,
-          signal: result.sentiment.signal,
-          confidence: result.sentiment.confidence,
-          reasoning: result.sentiment.reasoning,
+          score: lendResult.sentiment.score,
+          signal: lendResult.sentiment.signal,
+          confidence: lendResult.sentiment.confidence,
+          reasoning: lendResult.sentiment.reasoning,
         },
-        portfolio: result.portfolio,
-        execution: result.execution,
-        hcsLog: result.hcsLog,
-        durationMs: result.durationMs,
-        timestamp: result.timestamp,
+        portfolio: lendResult.portfolio,
+        execution: lendResult.execution,
+        hcsLog: lendResult.hcsLog,
+        vaultDecision: vaultResult,
+        durationMs: lendResult.durationMs,
+        timestamp: lendResult.timestamp,
       },
     });
   } catch (error: any) {

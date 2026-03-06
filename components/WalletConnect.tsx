@@ -113,10 +113,12 @@ export default function WalletConnect({
   onConnect,
   onDisconnect,
   connectedAccount,
+  externalWalletData,
 }: {
   onConnect: (accountId: string, walletData: WalletData) => void;
   onDisconnect: () => void;
   connectedAccount: string | null;
+  externalWalletData?: WalletData | null;
 }) {
   const [status, setStatus] = useState<ConnectionStatus>("disconnected");
   const [loading, setLoading] = useState(false);
@@ -129,6 +131,11 @@ export default function WalletConnect({
 
   const hashconnectRef = useRef<any>(null);
   const initRef = useRef(false);
+
+  // ── Compute active wallet data from EITHER internal state or external prop ──
+  // This ensures the connected UI shows IMMEDIATELY when chat connects externally,
+  // without waiting for a useEffect cycle.
+  const activeData = walletData || externalWalletData || null;
 
   // Suppress WalletConnect WebSocket errors that fire asynchronously
   // These happen when the project ID is invalid/missing — not user-facing
@@ -386,7 +393,7 @@ export default function WalletConnect({
   }
 
   // ══════════════ CONNECTED STATE ══════════════
-  if (connectedAccount && walletData) {
+  if (connectedAccount && activeData) {
     return (
       <div className="rounded-xl border border-emerald-500/20 bg-gray-900/60 p-3 card-glow">
         <div className="flex items-center justify-between">
@@ -413,12 +420,12 @@ export default function WalletConnect({
               </div>
               <div className="flex items-center gap-1.5">
                 <span className="text-[10px] text-emerald-400/70 bg-emerald-500/10 rounded px-1 py-px">
-                  {walletData.network === "mainnet" ? "Mainnet" : "Testnet"}
+                  {activeData.network === "mainnet" ? "Mainnet" : "Testnet"}
                 </span>
-                {walletData.evmAddress && (
+                {activeData.evmAddress && (
                   <span className="text-[10px] text-gray-500">
-                    EVM: {walletData.evmAddress.slice(0, 6)}...
-                    {walletData.evmAddress.slice(-4)}
+                    EVM: {activeData.evmAddress.slice(0, 6)}...
+                    {activeData.evmAddress.slice(-4)}
                   </span>
                 )}
               </div>
@@ -427,10 +434,10 @@ export default function WalletConnect({
           <div className="flex items-center gap-2">
             <div className="text-right mr-1">
               <div className="text-sm font-semibold text-gray-200">
-                {walletData.hbarBalance.toLocaleString()} ℏ
+                {activeData.hbarBalance.toLocaleString()} ℏ
               </div>
               <div className="text-[10px] text-gray-500">
-                ${walletData.hbarBalanceUSD.toLocaleString()}
+                ${activeData.hbarBalanceUSD.toLocaleString()}
               </div>
             </div>
             <button
@@ -451,17 +458,17 @@ export default function WalletConnect({
           </div>
         </div>
 
-        {walletData.tokens.length > 0 && (
+        {activeData.tokens.length > 0 && (
           <div className="mt-2 pt-2 border-t border-gray-800/40">
             <button
               onClick={() => setExpanded(!expanded)}
               className="text-[10px] text-gray-500 hover:text-gray-400 transition-colors mb-1"
             >
-              {walletData.tokens.length} tokens {expanded ? "▾" : "▸"}
+              {activeData.tokens.length} tokens {expanded ? "▾" : "▸"}
             </button>
             {expanded && (
               <div className="grid grid-cols-3 gap-1 mt-1">
-                {walletData.tokens.slice(0, 9).map((t) => (
+                {activeData.tokens.slice(0, 9).map((t) => (
                   <div
                     key={t.tokenId}
                     className="text-[11px] bg-gray-800/40 rounded px-2 py-1 flex justify-between"
@@ -481,7 +488,7 @@ export default function WalletConnect({
 
         <div className="mt-2 pt-2 border-t border-gray-800/40">
           <a
-            href={`https://hashscan.io/${walletData.network}/account/${connectedAccount}`}
+            href={`https://hashscan.io/${activeData.network}/account/${connectedAccount}`}
             target="_blank"
             rel="noopener noreferrer"
             className="text-[10px] text-emerald-400/70 hover:text-emerald-400 flex items-center gap-1"

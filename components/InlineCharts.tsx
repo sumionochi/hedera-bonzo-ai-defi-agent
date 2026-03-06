@@ -440,22 +440,81 @@ export function DeFiHeatMap() {
 // 6. OHLCV PRICE CHART (simplified line)
 // ════════════════════════════════════════════
 
-export function OHLCVChart({ poolId = 1 }: { poolId?: number }) {
+export function OHLCVChart({ poolId = 2 }: { poolId?: number }) {
   const [data, setData] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [source, setSource] = useState<string>("SaucerSwap");
 
   useEffect(() => {
+    // Try SaucerSwap first via charts API
     fetch(`/api/charts?type=ohlcv&poolId=${poolId}&days=30`)
       .then((r) => r.json())
       .then((j) => {
-        if (j.success) setData(j.data);
+        const bars = j.data?.bars || (Array.isArray(j.data) ? j.data : []);
+        if (bars.length > 0) {
+          setData(bars);
+          setSource("SaucerSwap");
+          setLoading(false);
+          return;
+        }
+        // Fallback: CoinGecko OHLC for HBAR
+        return fetch("https://api.coingecko.com/api/v3/coins/hedera-hashgraph/ohlc?vs_currency=usd&days=30")
+          .then((r) => r.json())
+          .then((ohlc: number[][]) => {
+            if (Array.isArray(ohlc) && ohlc.length > 0) {
+              // CoinGecko OHLC format: [timestamp, open, high, low, close]
+              // Aggregate to daily bars
+              const dailyMap = new Map<string, any>();
+              for (const [ts, open, high, low, close] of ohlc) {
+                const day = new Date(ts).toISOString().split("T")[0];
+                const existing = dailyMap.get(day);
+                if (existing) {
+                  existing.high = Math.max(existing.high, high);
+                  existing.low = Math.min(existing.low, low);
+                  existing.close = close; // last close of the day
+                } else {
+                  dailyMap.set(day, { timestamp: ts, open, high, low, close, volumeUsd: 0 });
+                }
+              }
+              setData(Array.from(dailyMap.values()));
+              setSource("CoinGecko");
+            }
+          });
       })
-      .catch(() => {})
+      .catch(() => {
+        // Final fallback: CoinGecko directly
+        fetch("https://api.coingecko.com/api/v3/coins/hedera-hashgraph/ohlc?vs_currency=usd&days=30")
+          .then((r) => r.json())
+          .then((ohlc: number[][]) => {
+            if (Array.isArray(ohlc) && ohlc.length > 0) {
+              const dailyMap = new Map<string, any>();
+              for (const [ts, open, high, low, close] of ohlc) {
+                const day = new Date(ts).toISOString().split("T")[0];
+                const existing = dailyMap.get(day);
+                if (existing) {
+                  existing.high = Math.max(existing.high, high);
+                  existing.low = Math.min(existing.low, low);
+                  existing.close = close;
+                } else {
+                  dailyMap.set(day, { timestamp: ts, open, high, low, close, volumeUsd: 0 });
+                }
+              }
+              setData(Array.from(dailyMap.values()));
+              setSource("CoinGecko");
+            }
+          })
+          .catch(() => {});
+      })
       .finally(() => setLoading(false));
   }, [poolId]);
 
   if (loading) return <ChartLoader label="price data" />;
-  if (!data.length) return null;
+  if (!data.length) return (
+    <div className="my-3 p-4 bg-gray-800/30 rounded-xl border border-gray-700/30 w-full">
+      <span className="text-sm font-semibold text-gray-200 block mb-2">Price Chart (30 Day)</span>
+      <p className="text-xs text-gray-500">Chart data temporarily unavailable. SaucerSwap OHLCV API may be rate-limited. Try again in a moment.</p>
+    </div>
+  );
 
   const chartData = data.map((bar: any) => ({
     date: new Date(bar.timestamp).toLocaleDateString("en-US", {
@@ -474,9 +533,12 @@ export function OHLCVChart({ poolId = 1 }: { poolId?: number }) {
 
   return (
     <div className="my-3 p-4 bg-gray-800/30 rounded-xl border border-gray-700/30 w-full">
-      <span className="text-sm font-semibold text-gray-200 block mb-3">
-        Price Chart (30 Day)
-      </span>
+      <div className="flex items-center justify-between mb-3">
+        <span className="text-sm font-semibold text-gray-200">
+          📈 HBAR Price Chart (30 Day)
+        </span>
+        <span className="text-[9px] text-gray-600">via {source}</span>
+      </div>
       <div className="h-56">
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={chartData}>
@@ -759,7 +821,21 @@ export type ChartType =
   | "heatmap"
   | "ohlcv"
   | "sentiment"
-  | "vaultcompare";
+  | "vaultcompare"
+  // Action-based inline components (Jarvis mode)
+  | "keeper"
+  | "positions"
+  | "hcs"
+  | "performance"
+  | "market"
+  | "history"
+  | "walletinfo"
+  // Jarvis Phase 2: Full control
+  | "strategyconfig"
+  | "vaultaction"
+  | "lendingaction"
+  | "confirm"
+  | "inlineerror";
 
 /**
  * Detect which chart(s) to render based on message content.
@@ -877,16 +953,643 @@ export function detectCharts(message: string): ChartType[] {
     charts.push("vaultcompare");
   }
 
+  // ── Jarvis Mode: Action/Feature Commands ──
+
+  // Keeper — run/execute/dry run
+  if (
+    lower.includes("run keeper") ||
+    lower.includes("run dry run") ||
+    lower.includes("dry run") ||
+    lower.includes("execute keeper") ||
+    lower.includes("keeper cycle") ||
+    lower.includes("trigger keeper") ||
+    lower.includes("start keeper")
+  ) {
+    charts.push("keeper");
+  }
+
+  // Positions — show my positions, health factor
+  if (
+    lower.includes("my positions") ||
+    lower.includes("show positions") ||
+    lower.includes("health factor") ||
+    lower.includes("bonzo positions") ||
+    lower.includes("lending positions") ||
+    lower.includes("what did i deposit") ||
+    lower.includes("what did i borrow")
+  ) {
+    charts.push("positions");
+  }
+
+  // HCS Audit Trail
+  if (
+    lower.includes("audit log") ||
+    lower.includes("audit trail") ||
+    lower.includes("hcs log") ||
+    lower.includes("hcs history") ||
+    lower.includes("show hcs") ||
+    lower.includes("decision log") ||
+    lower.includes("on-chain log") ||
+    lower.includes("show audit")
+  ) {
+    charts.push("hcs");
+  }
+
+  // Performance / Backtest
+  if (
+    lower.includes("backtest") ||
+    lower.includes("show performance") ||
+    lower.includes("strategy performance") ||
+    lower.includes("vaultmind vs hodl") ||
+    lower.includes("how would") ||
+    lower.includes("historical performance") ||
+    lower.includes("run backtest")
+  ) {
+    charts.push("performance");
+  }
+
+  // Market Overview
+  if (
+    lower.includes("bonzo market") ||
+    lower.includes("bonzo lend market") ||
+    lower.includes("show market") ||
+    lower.includes("lending market") ||
+    lower.includes("market overview") ||
+    lower.includes("all reserves") ||
+    lower.includes("supply and borrow rates")
+  ) {
+    charts.push("market");
+  }
+
+  // Decision History
+  if (
+    lower.includes("decision history") ||
+    lower.includes("keeper history") ||
+    lower.includes("past decisions") ||
+    lower.includes("show history") ||
+    lower.includes("what did the keeper do") ||
+    lower.includes("previous decisions")
+  ) {
+    charts.push("history");
+  }
+
+  // Wallet Info
+  if (
+    lower.includes("wallet info") ||
+    lower.includes("my wallet") ||
+    lower.includes("wallet details") ||
+    lower.includes("show wallet") ||
+    lower.includes("wallet balance") ||
+    lower.includes("connected wallet") ||
+    lower.includes("show my account")
+  ) {
+    charts.push("walletinfo");
+  }
+
+  // ── Jarvis Phase 2 Commands ──
+  const isQuestion = lower.startsWith("when") || lower.startsWith("how") || lower.startsWith("should") || lower.startsWith("why") || lower.startsWith("what") || lower.startsWith("can") || lower.includes("?");
+
+  // Strategy Config
+  if (
+    lower.includes("strategy config") ||
+    lower.includes("show config") ||
+    lower.includes("current strategy") ||
+    lower.includes("show strategy") ||
+    lower.includes("my strategy") ||
+    lower.includes("keeper settings") ||
+    lower.includes("reset strategy") ||
+    lower.includes("set bearish") ||
+    lower.includes("set bullish") ||
+    lower.includes("set confidence") ||
+    lower.includes("set volatility") ||
+    lower.includes("set health factor") ||
+    lower.includes("set yield")
+  ) {
+    charts.push("strategyconfig");
+  }
+
+  // Vault actions (deposit/withdraw/harvest) — only for imperative commands, not questions
+  if (!isQuestion) {
+    if (
+      (lower.includes("deposit") && lower.includes("vault")) ||
+      (lower.includes("withdraw") && lower.includes("vault")) ||
+      (lower.includes("harvest") && (lower.includes("vault") || lower.includes("now") || lower.includes("rewards"))) ||
+      lower.includes("switch vault")
+    ) {
+      charts.push("vaultaction");
+    }
+
+    // Lending actions (supply/borrow/repay/withdraw from Bonzo Lend)
+    if (
+      (lower.includes("supply") && (lower.includes("bonzo") || lower.includes("hbar") || lower.includes("usdc"))) ||
+      (lower.includes("borrow") && (lower.includes("bonzo") || lower.includes("usdc") || lower.includes("hbar"))) ||
+      (lower.includes("repay") && (lower.includes("loan") || lower.includes("debt") || lower.includes("usdc") || lower.includes("bonzo"))) ||
+      (lower.includes("withdraw") && lower.includes("supplied"))
+    ) {
+      charts.push("lendingaction");
+    }
+  }
+
   return charts;
 }
 
-/** Render a chart by type */
+// ============================================
+// Keeper Result Inline Component
+// ============================================
+
+function KeeperResultInline({ data }: { data?: any }) {
+  if (!data) return <ChartLoader label="Running keeper..." />;
+
+  const actionColors: Record<string, string> = {
+    HOLD: "text-yellow-400 bg-yellow-900/30 border-yellow-500/30",
+    HARVEST: "text-orange-400 bg-orange-900/30 border-orange-500/30",
+    REPAY_DEBT: "text-red-400 bg-red-900/30 border-red-500/30",
+    EXIT_TO_STABLE: "text-red-400 bg-red-900/30 border-red-500/30",
+    REBALANCE: "text-blue-400 bg-blue-900/30 border-blue-500/30",
+    INCREASE_POSITION: "text-emerald-400 bg-emerald-900/30 border-emerald-500/30",
+    DEPOSIT: "text-emerald-400 bg-emerald-900/30 border-emerald-500/30",
+    SWITCH_VAULT: "text-blue-400 bg-blue-900/30 border-blue-500/30",
+    WITHDRAW: "text-red-400 bg-red-900/30 border-red-500/30",
+  };
+
+  const lend = data.decision;
+  const vault = data.vaultDecision;
+
+  return (
+    <div className="rounded-xl border border-emerald-800/40 bg-gray-900/60 p-4 space-y-3">
+      <div className="flex items-center gap-2 text-sm font-medium text-emerald-400">
+        <span>⚡</span> Keeper Cycle Complete
+        <span className="text-[10px] text-gray-500 ml-auto">{data.durationMs}ms</span>
+      </div>
+
+      {/* Lending Decision */}
+      {lend && (
+        <div className="p-3 rounded-lg bg-gray-800/50 border border-gray-700/40">
+          <div className="flex items-center gap-2 mb-1.5">
+            <span className="text-xs text-gray-400">Bonzo Lend</span>
+            <span className={`text-xs font-semibold px-2 py-0.5 rounded-md border ${actionColors[lend.action] || "text-gray-400"}`}>
+              {lend.action}
+            </span>
+            <span className="text-[10px] text-gray-500 ml-auto">
+              Confidence: {(lend.confidence * 100).toFixed(0)}%
+            </span>
+          </div>
+          <p className="text-xs text-gray-400 leading-relaxed">{lend.reason}</p>
+          {lend.targetMarket && (
+            <p className="text-[10px] text-gray-500 mt-1">Target: {lend.targetMarket} • Amount: {lend.amount || "calculated"}</p>
+          )}
+        </div>
+      )}
+
+      {/* Vault Decision */}
+      {vault && (
+        <div className="p-3 rounded-lg bg-purple-900/20 border border-purple-700/30">
+          <div className="flex items-center gap-2 mb-1.5">
+            <span className="text-xs text-purple-300">Bonzo Vaults</span>
+            <span className={`text-xs font-semibold px-2 py-0.5 rounded-md border ${actionColors[vault.action] || "text-gray-400"}`}>
+              {vault.action}
+            </span>
+            <span className="text-[10px] text-gray-500 ml-auto">
+              Confidence: {vault.confidence > 1 ? vault.confidence.toFixed(0) : (vault.confidence * 100).toFixed(0)}%
+            </span>
+          </div>
+          <p className="text-xs text-gray-400 leading-relaxed">{vault.reason}</p>
+        </div>
+      )}
+
+      {/* Sentiment Context */}
+      {data.sentiment && (
+        <div className="flex items-center gap-3 text-[10px] text-gray-500 pt-1 border-t border-gray-800/60">
+          <span>Sentiment: {data.sentiment.score > 0 ? "+" : ""}{data.sentiment.score}</span>
+          <span>•</span>
+          <span>Signal: {data.sentiment.signal}</span>
+          {data.hcsLog?.logged && (
+            <>
+              <span>•</span>
+              <span className="text-emerald-400">✓ HCS Logged</span>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================
+// Positions Inline Component
+// ============================================
+
+function PositionsInline({ data }: { data?: any }) {
+  const [positions, setPositions] = useState<any>(data || null);
+  const [loading, setLoading] = useState(!data);
+
+  useEffect(() => {
+    if (data) { setPositions(data); return; }
+    fetch("/api/positions").then(r => r.json()).then(j => {
+      if (j.success) setPositions(j.data);
+    }).finally(() => setLoading(false));
+  }, [data]);
+
+  if (loading) return <ChartLoader label="Fetching positions..." />;
+  if (!positions) return <div className="text-xs text-gray-500 p-3">No position data available</div>;
+
+  const p = positions;
+  return (
+    <div className="rounded-xl border border-gray-800/40 bg-gray-900/60 p-4 space-y-3">
+      <div className="flex items-center gap-2 text-sm font-medium text-gray-300">
+        <span>📊</span> Bonzo Lend Positions
+        <span className="text-[10px] text-gray-500 ml-auto">{p.accountId}</span>
+      </div>
+
+      {/* Summary Row */}
+      <div className="grid grid-cols-4 gap-2 text-center">
+        {[
+          { label: "Supplied", value: `$${(p.totalSuppliedUSD || 0).toFixed(2)}`, color: "text-emerald-400" },
+          { label: "Borrowed", value: `$${(p.totalBorrowedUSD || 0).toFixed(2)}`, color: "text-red-400" },
+          { label: "Net Worth", value: `$${(p.netWorthUSD || 0).toFixed(2)}`, color: "text-blue-400" },
+          { label: "Health Factor", value: !p.healthFactor || p.healthFactor > 1e10 ? "∞ Safe" : p.healthFactor.toFixed(2), color: !p.healthFactor || p.healthFactor > 1e10 || p.healthFactor >= 1.5 ? "text-emerald-400" : p.healthFactor < 1.2 ? "text-red-400" : "text-yellow-400" },
+        ].map((item) => (
+          <div key={item.label} className="bg-gray-800/40 rounded-lg p-2">
+            <div className="text-[10px] text-gray-500">{item.label}</div>
+            <div className={`text-sm font-semibold ${item.color}`}>{item.value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Position Rows */}
+      {p.positions && p.positions.length > 0 ? (
+        <div className="space-y-1">
+          {p.positions.map((pos: any, i: number) => (
+            <div key={i} className="flex items-center justify-between px-3 py-2 rounded-lg bg-gray-800/30 text-xs">
+              <div className="flex items-center gap-2">
+                <span className="font-medium text-gray-200">{pos.symbol}</span>
+                {pos.isCollateral && <span className="text-[9px] text-emerald-400/70 bg-emerald-500/10 rounded px-1">collateral</span>}
+              </div>
+              <div className="flex gap-4 text-right">
+                <div>
+                  <div className="text-emerald-400">${(pos.suppliedUSD || 0).toFixed(2)}</div>
+                  <div className="text-[9px] text-gray-600">{pos.supplyAPY?.toFixed(2)}% APY</div>
+                </div>
+                {pos.borrowedUSD > 0 && (
+                  <div>
+                    <div className="text-red-400">-${pos.borrowedUSD.toFixed(2)}</div>
+                    <div className="text-[9px] text-gray-600">{pos.borrowAPY?.toFixed(2)}% APY</div>
+                  </div>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="text-xs text-gray-500 text-center py-2">No active Bonzo Lend positions</p>
+      )}
+
+      {p.averageNetAPY !== undefined && p.averageNetAPY !== 0 && (
+        <div className="text-[10px] text-gray-500 text-center pt-1 border-t border-gray-800/50">
+          Average Net APY: <span className="text-emerald-400">{p.averageNetAPY.toFixed(2)}%</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================
+// HCS Audit Timeline Inline Component
+// ============================================
+
+function HCSInline({ data }: { data?: any }) {
+  const [entries, setEntries] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [topicId, setTopicId] = useState<string | null>(null);
+
+  const filterAction = data?.filterAction; // e.g. "HARVEST"
+  const filterCount = data?.filterCount || 10;
+
+  useEffect(() => {
+    // Get topicId from localStorage (set by keeper runs)
+    const storedTopic = typeof window !== "undefined"
+      ? localStorage.getItem("vaultmind_hcs_topic")
+      : null;
+
+    const url = storedTopic
+      ? `/api/hcs?topicId=${storedTopic}&limit=${Math.min(filterCount * 3, 50)}`
+      : `/api/hcs?limit=${Math.min(filterCount * 3, 50)}`;
+
+    fetch(url).then(r => r.json()).then(j => {
+      if (j.success) {
+        let msgs = j.data?.messages || j.data?.decisions || [];
+        // Apply action filter if specified
+        if (filterAction) {
+          msgs = msgs.filter((m: any) => {
+            // Entries may be already-parsed objects or raw messages
+            if (m.action) return m.action.toUpperCase() === filterAction;
+            try {
+              const parsed = typeof m.message === "string"
+                ? (m.message.startsWith("{") ? JSON.parse(m.message) : JSON.parse(atob(m.message)))
+                : m;
+              return (parsed.action || "").toUpperCase() === filterAction;
+            } catch { return false; }
+          });
+        }
+        setEntries(msgs.slice(0, filterCount));
+        setTopicId(j.data?.topicId || storedTopic || null);
+      }
+    }).finally(() => setLoading(false));
+  }, [filterAction, filterCount]);
+
+  if (loading) return <ChartLoader label="Fetching HCS audit log..." />;
+
+  return (
+    <div className="rounded-xl border border-cyan-800/40 bg-gray-900/60 p-4 space-y-3">
+      <div className="flex items-center gap-2 text-sm font-medium text-cyan-400">
+        <span>📋</span> HCS Audit Trail
+        {topicId && <span className="text-[10px] text-gray-500 ml-auto">Audit Topic: {topicId}</span>}
+      </div>
+
+      {entries.length === 0 ? (
+        <p className="text-xs text-gray-500 text-center py-3">No audit entries yet. Run the keeper to create entries.</p>
+      ) : (
+        <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1">
+          {entries.slice(0, 8).map((entry: any, i: number) => {
+            // Entries may be parsed AgentDecisionLog objects OR raw Mirror Node messages
+            const action = entry.action || (() => {
+              try {
+                const parsed = JSON.parse(typeof entry.message === "string" && entry.message.startsWith("{")
+                  ? entry.message
+                  : atob(entry.message || ""));
+                return parsed.action;
+              } catch { return "LOGGED"; }
+            })();
+            const reason = entry.reason || (() => {
+              try {
+                const parsed = JSON.parse(typeof entry.message === "string" && entry.message.startsWith("{")
+                  ? entry.message
+                  : atob(entry.message || ""));
+                return parsed.reason;
+              } catch { return ""; }
+            })();
+            const seqNum = entry.sequenceNumber || entry.sequence_number;
+            const ts = entry.consensusTimestamp || entry.consensus_timestamp;
+
+            return (
+              <div key={i} className="p-2.5 rounded-lg bg-gray-800/40 border border-gray-700/30">
+                <div className="flex items-center justify-between mb-1">
+                  <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${
+                    action === "HOLD" ? "text-yellow-400 bg-yellow-400/10" :
+                    action === "HARVEST" ? "text-orange-400 bg-orange-400/10" :
+                    "text-emerald-400 bg-emerald-400/10"
+                  }`}>{action}</span>
+                  <span className="text-[9px] text-gray-600">
+                    seq #{seqNum} {ts ? `• ${new Date(Number(String(ts).split(".")[0]) * 1000).toLocaleTimeString()}` : ""}
+                  </span>
+                </div>
+                {reason && <p className="text-[10px] text-gray-400 leading-relaxed">{reason.substring(0, 120)}{reason.length > 120 ? "..." : ""}</p>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {topicId && (
+        <div className="text-[10px] text-center">
+          <a href={`https://hashscan.io/testnet/topic/${topicId}`} target="_blank" rel="noopener noreferrer" className="text-cyan-400 hover:underline">
+            View on HashScan →
+          </a>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================
+// Performance / Backtest Inline Component
+// ============================================
+
+function PerformanceInline() {
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch("/api/performance?days=30&investment=1000").then(r => r.json()).then(j => {
+      if (j.success) setData(j.data);
+    }).finally(() => setLoading(false));
+  }, []);
+
+  if (loading) return <ChartLoader label="Running backtest..." />;
+  if (!data) return <div className="text-xs text-gray-500 p-3">Backtest data unavailable</div>;
+
+  // API returns { dataPoints: [...], summary: { vaultmindReturn, passiveReturn, outperformance, totalDecisions, ... } }
+  const s = data.summary || {};
+  const strategyReturn = s.vaultmindReturn ?? 0;
+  const hodlReturn = s.passiveReturn ?? 0;
+  const alpha = s.outperformance ?? (strategyReturn - hodlReturn);
+  const totalDecisions = s.totalDecisions ?? 0;
+  const winRate = totalDecisions > 0 ? ((s.harvests || 0) + (s.increases || 0)) / totalDecisions * 100 : 0;
+  const dailyData = (data.dataPoints || []).map((p: any) => ({
+    date: p.date,
+    strategy: p.vaultmindValue,
+    hodl: p.passiveValue,
+  }));
+
+  return (
+    <div className="rounded-xl border border-amber-800/40 bg-gray-900/60 p-4 space-y-3">
+      <div className="flex items-center gap-2 text-sm font-medium text-amber-400">
+        <span>📈</span> Backtest: VaultMind vs HODL (30 Days)
+      </div>
+
+      {/* Summary Stats */}
+      <div className="grid grid-cols-3 gap-2">
+        {[
+          { label: "VaultMind Return", value: `${strategyReturn > 0 ? "+" : ""}${strategyReturn.toFixed(2)}%`, color: strategyReturn > 0 ? "text-emerald-400" : "text-red-400" },
+          { label: "HODL Return", value: `${hodlReturn > 0 ? "+" : ""}${hodlReturn.toFixed(2)}%`, color: hodlReturn > 0 ? "text-emerald-400" : "text-red-400" },
+          { label: "Alpha", value: `${alpha > 0 ? "+" : ""}${alpha.toFixed(2)}%`, color: alpha > 0 ? "text-emerald-400" : "text-red-400" },
+        ].map((stat) => (
+          <div key={stat.label} className="bg-gray-800/40 rounded-lg p-2 text-center">
+            <div className="text-[10px] text-gray-500">{stat.label}</div>
+            <div className={`text-sm font-semibold ${stat.color}`}>{stat.value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Mini Chart */}
+      {dailyData.length > 0 && (
+        <ResponsiveContainer width="100%" height={150}>
+          <LineChart data={dailyData} margin={{ top: 5, right: 5, left: 0, bottom: 5 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+            <XAxis dataKey="date" tick={{ fontSize: 9, fill: "#6b7280" }} tickFormatter={(v: string) => v?.substring(5) || ""} />
+            <YAxis tick={{ fontSize: 9, fill: "#6b7280" }} domain={["auto", "auto"]} tickFormatter={(v: number) => `$${v.toFixed(0)}`} />
+            <Tooltip contentStyle={{ background: "#111827", border: "1px solid #374151", borderRadius: "8px", fontSize: "11px" }} />
+            <Line dataKey="strategy" name="VaultMind" stroke="#10b981" strokeWidth={2} dot={false} />
+            <Line dataKey="hodl" name="HODL" stroke="#6b7280" strokeWidth={1.5} dot={false} strokeDasharray="4 4" />
+            <Legend wrapperStyle={{ fontSize: "10px" }} />
+          </LineChart>
+        </ResponsiveContainer>
+      )}
+
+      <div className="flex justify-between text-[10px] text-gray-500 pt-1 border-t border-gray-800/50">
+        <span>Decisions: {totalDecisions}</span>
+        <span>Win Rate: {winRate.toFixed(0)}%</span>
+        <span>Harvests: {s.harvests || 0} | Holds: {s.holds || 0}</span>
+      </div>
+    </div>
+  );
+}
+
+// ============================================
+// Market Overview Inline Component
+// ============================================
+
+function MarketInline({ data }: { data?: any }) {
+  const [markets, setMarkets] = useState<any[]>(data?.markets || []);
+  const [loading, setLoading] = useState(!data);
+
+  useEffect(() => {
+    if (data?.markets) { setMarkets(data.markets); return; }
+    fetch("/api/market").then(r => r.json()).then(j => {
+      if (j.success) setMarkets(j.data?.markets || []);
+    }).finally(() => setLoading(false));
+  }, [data]);
+
+  if (loading) return <ChartLoader label="Fetching Bonzo Lend markets..." />;
+
+  const sorted = [...markets].filter((m: any) => m.isActive !== false).sort((a: any, b: any) => (b.supplyAPY || 0) - (a.supplyAPY || 0));
+
+  return (
+    <div className="rounded-xl border border-gray-800/40 bg-gray-900/60 p-4 space-y-3">
+      <div className="flex items-center gap-2 text-sm font-medium text-gray-300">
+        <span>🏦</span> Bonzo Lend Markets
+        <span className="text-[10px] text-gray-500 ml-auto">{sorted.length} active reserves</span>
+      </div>
+      <div className="space-y-1">
+        {sorted.slice(0, 10).map((m: any) => (
+          <div key={m.symbol} className="flex items-center justify-between px-3 py-2 rounded-lg bg-gray-800/30">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-medium text-gray-200 w-16">{m.symbol}</span>
+              <div className="w-24 h-1.5 bg-gray-700 rounded-full overflow-hidden">
+                <div className="h-full bg-emerald-500/50 rounded-full" style={{ width: `${Math.min(m.utilizationRate || 0, 100)}%` }} />
+              </div>
+              <span className="text-[9px] text-gray-500">{(m.utilizationRate || 0).toFixed(0)}% util</span>
+            </div>
+            <div className="flex gap-4 text-xs text-right">
+              <div>
+                <span className="text-emerald-400">{(m.supplyAPY || 0).toFixed(2)}%</span>
+                <span className="text-[9px] text-gray-600 ml-1">supply</span>
+              </div>
+              <div>
+                <span className="text-red-400">{(m.borrowAPY || 0).toFixed(2)}%</span>
+                <span className="text-[9px] text-gray-600 ml-1">borrow</span>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ============================================
+// Decision History Inline Component
+// ============================================
+
+function DecisionHistoryInline({ data }: { data?: any }) {
+  if (!data?.history || data.history.length === 0) {
+    return (
+      <div className="rounded-xl border border-gray-800/40 bg-gray-900/60 p-4 text-center">
+        <span className="text-xs text-gray-500">No keeper decisions this session. Run the keeper first.</span>
+      </div>
+    );
+  }
+
+  const actionEmojis: Record<string, string> = {
+    HOLD: "⏸️", HARVEST: "🌾", REPAY_DEBT: "💸", EXIT_TO_STABLE: "🛡️",
+    REBALANCE: "⚖️", INCREASE_POSITION: "📈", DEPOSIT: "💰", SWITCH_VAULT: "🔄", WITHDRAW: "📤",
+  };
+
+  return (
+    <div className="rounded-xl border border-gray-800/40 bg-gray-900/60 p-4 space-y-3">
+      <div className="flex items-center gap-2 text-sm font-medium text-gray-300">
+        <span>📜</span> Decision History
+        <span className="text-[10px] text-gray-500 ml-auto">{data.history.length} decisions</span>
+      </div>
+      <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1">
+        {data.history.slice(0, 10).map((h: any, i: number) => (
+          <div key={i} className="flex items-start gap-2 p-2.5 rounded-lg bg-gray-800/40 border border-gray-700/30">
+            <span className="text-sm mt-0.5">{actionEmojis[h.decision?.action] || "⚡"}</span>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-0.5">
+                <span className="text-xs font-medium text-gray-200">{h.decision?.action}</span>
+                <span className="text-[9px] text-gray-600">{new Date(h.timestamp).toLocaleTimeString()}</span>
+              </div>
+              <p className="text-[10px] text-gray-400 leading-relaxed truncate">{h.decision?.reason}</p>
+            </div>
+            <span className="text-[9px] text-gray-600 flex-shrink-0">{h.durationMs}ms</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ============================================
+// Wallet Info Inline Component
+// ============================================
+
+function WalletInfoInline({ data }: { data?: any }) {
+  if (!data) {
+    return (
+      <div className="rounded-xl border border-gray-800/40 bg-gray-900/60 p-4 text-center">
+        <span className="text-xs text-gray-500">No wallet connected. Type: connect wallet 0.0.XXXXX</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-xl border border-emerald-800/40 bg-gray-900/60 p-4 space-y-3">
+      <div className="flex items-center gap-2 text-sm font-medium text-emerald-400">
+        <span>👛</span> Wallet Connected
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        <div className="bg-gray-800/40 rounded-lg p-2 text-center">
+          <div className="text-[10px] text-gray-500">Account</div>
+          <div className="text-xs font-medium text-gray-200">{data.accountId}</div>
+        </div>
+        <div className="bg-gray-800/40 rounded-lg p-2 text-center">
+          <div className="text-[10px] text-gray-500">HBAR</div>
+          <div className="text-sm font-semibold text-emerald-400">{(data.hbarBalance || 0).toFixed(2)}</div>
+        </div>
+        <div className="bg-gray-800/40 rounded-lg p-2 text-center">
+          <div className="text-[10px] text-gray-500">USD Value</div>
+          <div className="text-sm font-semibold text-blue-400">${(data.hbarBalanceUSD || 0).toFixed(2)}</div>
+        </div>
+      </div>
+      {data.tokens && data.tokens.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-[10px] text-gray-500">Token Balances</div>
+          {data.tokens.slice(0, 5).map((t: any) => (
+            <div key={t.tokenId} className="flex justify-between text-xs px-2 py-1 bg-gray-800/30 rounded">
+              <span className="text-gray-300">{t.symbol}</span>
+              <span className="text-gray-400">{t.balance.toFixed(4)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="text-[10px] text-gray-600 text-center">
+        Network: {data.network || "testnet"} {data.evmAddress && `• EVM: ${data.evmAddress.substring(0, 10)}...`}
+      </div>
+    </div>
+  );
+}
+
+/** Render a chart/component by type */
 export function InlineChart({
   type,
   sentiment,
+  data,
+  onAction,
 }: {
   type: ChartType;
   sentiment?: { score: number; signal: string; confidence: number };
+  data?: any;
+  onAction?: (action: string, payload?: any) => void;
 }) {
   switch (type) {
     case "portfolio":
@@ -911,7 +1614,408 @@ export function InlineChart({
       );
     case "vaultcompare":
       return <VaultCompareChart />;
+    // ── Jarvis Mode Components ──
+    case "keeper":
+      return <KeeperResultInline data={data} />;
+    case "positions":
+      return <PositionsInline data={data} />;
+    case "hcs":
+      return <HCSInline data={data} />;
+    case "performance":
+      return <PerformanceInline />;
+    case "market":
+      return <MarketInline data={data} />;
+    case "history":
+      return <DecisionHistoryInline data={data} />;
+    case "walletinfo":
+      return <WalletInfoInline data={data} />;
+    // ── Jarvis Phase 2: Full Control ──
+    case "strategyconfig":
+      return <StrategyConfigInline data={data} />;
+    case "vaultaction":
+      return <VaultActionInline data={data} onAction={onAction} />;
+    case "lendingaction":
+      return <LendingActionInline data={data} onAction={onAction} />;
+    case "confirm":
+      return <ConfirmActionInline data={data} onAction={onAction} />;
+    case "inlineerror":
+      return <ErrorInline data={data} />;
     default:
       return null;
   }
+}
+
+// ============================================
+// Jarvis Phase 2: Strategy Config Inline
+// ============================================
+
+function StrategyConfigInline({ data }: { data?: any }) {
+  if (!data) return null;
+  const { config, changes, action: configAction } = data;
+
+  return (
+    <div className="rounded-xl border border-indigo-800/40 bg-gray-900/60 p-4 space-y-3">
+      <div className="flex items-center gap-2 text-sm font-medium text-indigo-400">
+        <span>⚙️</span>
+        {configAction === "show" ? "Current Strategy Config" :
+         configAction === "reset" ? "Strategy Reset to Defaults" :
+         "Strategy Config Updated"}
+      </div>
+
+      {/* Show changes if any */}
+      {changes && changes.length > 0 && (
+        <div className="space-y-1.5">
+          {changes.map((c: any, i: number) => (
+            <div key={i} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-indigo-900/20 border border-indigo-700/20">
+              <span className="text-xs text-gray-400 w-36">{c.label}</span>
+              <span className="text-xs text-red-400 line-through">{c.old}</span>
+              <span className="text-xs text-gray-500">→</span>
+              <span className="text-xs text-emerald-400 font-medium">{c.new}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Show full config */}
+      {config && (
+        <div className="grid grid-cols-2 gap-2">
+          {[
+            { label: "Bearish Threshold", value: config.bearishThreshold, color: "text-red-400" },
+            { label: "Bullish Threshold", value: config.bullishThreshold, color: "text-emerald-400" },
+            { label: "Confidence Min", value: `${(config.confidenceMinimum * 100).toFixed(0)}%`, color: "text-blue-400" },
+            { label: "HF Danger", value: config.healthFactorDanger, color: "text-red-400" },
+            { label: "HF Target", value: config.healthFactorTarget, color: "text-emerald-400" },
+            { label: "High Vol Threshold", value: `${config.highVolatilityThreshold}%`, color: "text-orange-400" },
+            { label: "Min Yield Diff", value: `${config.minYieldDifferential}%`, color: "text-blue-400" },
+          ].map((item) => (
+            <div key={item.label} className="flex items-center justify-between px-2 py-1.5 rounded bg-gray-800/30 text-xs">
+              <span className="text-gray-500">{item.label}</span>
+              <span className={`font-medium ${item.color}`}>{item.value}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="text-[10px] text-gray-600 text-center pt-1 border-t border-gray-800/50">
+        Keeper will use these parameters on next cycle
+      </div>
+    </div>
+  );
+}
+
+// ============================================
+// Jarvis Phase 2: Vault Action Preview
+// ============================================
+
+function VaultActionInline({ data, onAction }: { data?: any; onAction?: (a: string, p?: any) => void }) {
+  if (!data) return null;
+
+  const actionColors: Record<string, string> = {
+    deposit: "text-emerald-400 border-emerald-500/30 bg-emerald-900/20",
+    withdraw: "text-red-400 border-red-500/30 bg-red-900/20",
+    harvest: "text-orange-400 border-orange-500/30 bg-orange-900/20",
+    switch: "text-blue-400 border-blue-500/30 bg-blue-900/20",
+  };
+
+  const status = data.status || "preview"; // preview | executed | failed
+
+  return (
+    <div className={`rounded-xl border ${actionColors[data.action]?.split(" ").slice(1).join(" ") || "border-gray-700/40 bg-gray-900/60"} p-4 space-y-3`}>
+      <div className="flex items-center gap-2 text-sm font-medium">
+        <span>{data.action === "deposit" ? "💰" : data.action === "withdraw" ? "📤" : data.action === "harvest" ? "🌾" : "🔄"}</span>
+        <span className={actionColors[data.action]?.split(" ")[0] || "text-gray-300"}>
+          Vault {data.action.charAt(0).toUpperCase() + data.action.slice(1)} {status === "preview" ? "Preview" : status === "executed" ? "" : "Failed"}
+        </span>
+        {status === "executed" && <span className="text-[10px] text-emerald-400 bg-emerald-400/10 px-1.5 py-0.5 rounded-full ml-auto">✓ On-Chain</span>}
+        {status === "failed" && <span className="text-[10px] text-red-400 bg-red-400/10 px-1.5 py-0.5 rounded-full ml-auto">✗ Failed</span>}
+      </div>
+
+      <div className="space-y-1.5">
+        {data.vault && (
+          <div className="flex justify-between text-xs px-2 py-1.5 bg-gray-800/30 rounded">
+            <span className="text-gray-500">Vault</span>
+            <span className="text-gray-200">{data.vault}</span>
+          </div>
+        )}
+        {data.amount && (
+          <div className="flex justify-between text-xs px-2 py-1.5 bg-gray-800/30 rounded">
+            <span className="text-gray-500">Amount</span>
+            <span className="text-gray-200">{data.amount}</span>
+          </div>
+        )}
+        {data.expectedApy && (
+          <div className="flex justify-between text-xs px-2 py-1.5 bg-gray-800/30 rounded">
+            <span className="text-gray-500">Expected APY</span>
+            <span className="text-emerald-400">{data.expectedApy}%</span>
+          </div>
+        )}
+        {data.estimatedGas && status === "preview" && (
+          <div className="flex justify-between text-xs px-2 py-1.5 bg-gray-800/30 rounded">
+            <span className="text-gray-500">Est. Gas</span>
+            <span className="text-gray-400">{data.estimatedGas}</span>
+          </div>
+        )}
+        {data.riskWarning && (
+          <div className="text-[10px] text-orange-400 bg-orange-500/10 border border-orange-500/20 rounded-lg px-2 py-1.5">
+            ⚠️ {data.riskWarning}
+          </div>
+        )}
+      </div>
+
+      {/* ── Real Transaction Proof ── */}
+      {status === "executed" && data.txIds?.length > 0 && (
+        <div className="space-y-1.5 border-t border-gray-700/30 pt-2">
+          {data.txIds.map((txId: string, i: number) => (
+            <div key={i} className="flex items-center gap-2 text-[10px]">
+              <span className="text-gray-500">Tx {i + 1}:</span>
+              <code className="text-emerald-400 font-mono flex-1 truncate">{txId}</code>
+              {data.hashScanLinks?.[i] && (
+                <a href={data.hashScanLinks[i]} target="_blank" rel="noopener noreferrer"
+                  className="text-emerald-400/60 hover:text-emerald-400 flex-shrink-0">
+                  HashScan ↗
+                </a>
+              )}
+            </div>
+          ))}
+          {data.durationMs && (
+            <div className="text-[9px] text-gray-600">
+              Executed in {(data.durationMs / 1000).toFixed(1)}s
+              {data.toolCalls?.length > 0 && ` • ${data.toolCalls.length} tool calls: ${data.toolCalls.map((t: any) => t.tool).join(", ")}`}
+            </div>
+          )}
+          {data.hcsLog && (
+            <div className="text-[9px] text-gray-600">
+              ✓ Logged to HCS audit topic {data.hcsLog.topicId} (seq #{data.hcsLog.sequenceNumber})
+            </div>
+          )}
+        </div>
+      )}
+
+      {status === "preview" && onAction && (
+        <div className="flex gap-2 pt-1">
+          <button
+            onClick={() => onAction("confirm_vault", data)}
+            className="flex-1 text-xs font-medium py-2 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 transition-colors"
+          >
+            ✓ Confirm {data.action}
+          </button>
+          <button
+            onClick={() => onAction("cancel_vault", data)}
+            className="flex-1 text-xs font-medium py-2 rounded-lg bg-gray-700/30 hover:bg-gray-700/50 text-gray-400 border border-gray-600/30 transition-colors"
+          >
+            ✗ Cancel
+          </button>
+        </div>
+      )}
+      {data.error && (
+        <div className="text-[10px] text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-2 py-1.5">
+          {data.error}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================
+// Jarvis Phase 2: Lending Action Preview
+// ============================================
+
+function LendingActionInline({ data, onAction }: { data?: any; onAction?: (a: string, p?: any) => void }) {
+  if (!data) return null;
+
+  const actionLabels: Record<string, string> = {
+    supply: "Supply to Bonzo Lend",
+    borrow: "Borrow from Bonzo Lend",
+    repay: "Repay Bonzo Loan",
+    withdraw: "Withdraw from Bonzo Lend",
+  };
+
+  const status = data.status || "preview";
+
+  return (
+    <div className="rounded-xl border border-blue-800/40 bg-gray-900/60 p-4 space-y-3">
+      <div className="flex items-center gap-2 text-sm font-medium text-blue-400">
+        <span>🏦</span>
+        {actionLabels[data.action] || "Lending Action"} {status === "preview" ? "Preview" : ""}
+        {status === "executed" && <span className="text-[10px] text-emerald-400 bg-emerald-400/10 px-1.5 py-0.5 rounded-full ml-auto">✓ On-Chain</span>}
+        {status === "failed" && <span className="text-[10px] text-red-400 bg-red-400/10 px-1.5 py-0.5 rounded-full ml-auto">✗ Failed</span>}
+      </div>
+
+      <div className="space-y-1.5">
+        <div className="flex justify-between text-xs px-2 py-1.5 bg-gray-800/30 rounded">
+          <span className="text-gray-500">Asset</span>
+          <span className="text-gray-200">{data.asset || "HBAR"}</span>
+        </div>
+        <div className="flex justify-between text-xs px-2 py-1.5 bg-gray-800/30 rounded">
+          <span className="text-gray-500">Amount</span>
+          <span className="text-gray-200">{data.amount}</span>
+        </div>
+        {data.currentApy && (
+          <div className="flex justify-between text-xs px-2 py-1.5 bg-gray-800/30 rounded">
+            <span className="text-gray-500">Current APY</span>
+            <span className={data.action === "borrow" ? "text-red-400" : "text-emerald-400"}>{data.currentApy}%</span>
+          </div>
+        )}
+
+        {/* Health Factor Impact */}
+        {data.healthFactorBefore !== undefined && (
+          <div className="flex items-center gap-2 px-2 py-2 rounded bg-gray-800/40">
+            <span className="text-[10px] text-gray-500 w-20">Health Factor</span>
+            <span className={`text-xs font-medium ${!data.healthFactorBefore || data.healthFactorBefore > 1e10 || data.healthFactorBefore >= 1.5 ? "text-emerald-400" : "text-red-400"}`}>
+              {!data.healthFactorBefore || data.healthFactorBefore > 1e10 ? "∞" : data.healthFactorBefore.toFixed(2)}
+            </span>
+            <span className="text-xs text-gray-500">→</span>
+            <span className={`text-xs font-medium ${!data.healthFactorAfter || data.healthFactorAfter > 1e10 || data.healthFactorAfter >= 1.5 ? "text-emerald-400" : "text-red-400"}`}>
+              {!data.healthFactorAfter || data.healthFactorAfter > 1e10 ? "∞" : data.healthFactorAfter.toFixed(2)}
+            </span>
+            {data.healthFactorAfter && data.healthFactorAfter < 1e10 && data.healthFactorAfter < 1.3 && (
+              <span className="text-[9px] text-red-500 font-medium ml-1">⚠ DANGER</span>
+            )}
+          </div>
+        )}
+
+        {data.liquidationRisk && (
+          <div className="text-[10px] text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-2 py-1.5 font-medium">
+            🚨 {data.liquidationRisk}
+          </div>
+        )}
+      </div>
+
+      {/* ── Real Transaction Proof ── */}
+      {status === "executed" && data.txIds?.length > 0 && (
+        <div className="space-y-1.5 border-t border-gray-700/30 pt-2">
+          {data.txIds.map((txId: string, i: number) => (
+            <div key={i} className="flex items-center gap-2 text-[10px]">
+              <span className="text-gray-500">Tx {i + 1}:</span>
+              <code className="text-blue-400 font-mono flex-1 truncate">{txId}</code>
+              {data.hashScanLinks?.[i] && (
+                <a href={data.hashScanLinks[i]} target="_blank" rel="noopener noreferrer"
+                  className="text-blue-400/60 hover:text-blue-400 flex-shrink-0">
+                  HashScan ↗
+                </a>
+              )}
+            </div>
+          ))}
+          {data.durationMs && (
+            <div className="text-[9px] text-gray-600">
+              Executed in {(data.durationMs / 1000).toFixed(1)}s
+              {data.toolCalls?.length > 0 && ` • ${data.toolCalls.length} tool calls: ${data.toolCalls.map((t: any) => t.tool).join(", ")}`}
+            </div>
+          )}
+          {data.hcsLog && (
+            <div className="text-[9px] text-gray-600">
+              ✓ Logged to HCS audit topic {data.hcsLog.topicId} (seq #{data.hcsLog.sequenceNumber})
+            </div>
+          )}
+        </div>
+      )}
+
+      {status === "preview" && onAction && (
+        <div className="flex gap-2 pt-1">
+          <button
+            onClick={() => onAction("confirm_lending", data)}
+            className="flex-1 text-xs font-medium py-2 rounded-lg bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-500/30 transition-colors"
+          >
+            ✓ Confirm {data.action}
+          </button>
+          <button
+            onClick={() => onAction("cancel_lending", data)}
+            className="flex-1 text-xs font-medium py-2 rounded-lg bg-gray-700/30 hover:bg-gray-700/50 text-gray-400 border border-gray-600/30 transition-colors"
+          >
+            ✗ Cancel
+          </button>
+        </div>
+      )}
+      {data.error && (
+        <div className="text-[10px] text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-2 py-1.5">
+          {data.error}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================
+// Jarvis Phase 2: Confirm Action (Two-Step)
+// ============================================
+
+function ConfirmActionInline({ data, onAction }: { data?: any; onAction?: (a: string, p?: any) => void }) {
+  if (!data) return null;
+
+  return (
+    <div className="rounded-xl border border-amber-700/50 bg-amber-950/20 p-4 space-y-3">
+      <div className="flex items-center gap-2 text-sm font-medium text-amber-400">
+        <span>⚠️</span> Confirmation Required
+      </div>
+
+      <div className="text-xs text-gray-300 leading-relaxed">
+        {data.description || "You are about to perform a sensitive action."}
+      </div>
+
+      <div className="space-y-1.5">
+        {data.details && data.details.map((d: any, i: number) => (
+          <div key={i} className="flex justify-between text-xs px-2 py-1.5 bg-gray-800/30 rounded">
+            <span className="text-gray-500">{d.label}</span>
+            <span className="text-gray-200">{d.value}</span>
+          </div>
+        ))}
+      </div>
+
+      {data.warning && (
+        <div className="text-[10px] text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-2 py-1.5">
+          {data.warning}
+        </div>
+      )}
+
+      {onAction && (
+        <div className="flex gap-2 pt-1">
+          <button
+            onClick={() => onAction("confirm_execute", data)}
+            className="flex-1 text-xs font-medium py-2.5 rounded-lg bg-amber-600/20 hover:bg-amber-600/30 text-amber-400 border border-amber-500/40 transition-colors"
+          >
+            ✓ Yes, Execute
+          </button>
+          <button
+            onClick={() => onAction("cancel_execute", data)}
+            className="flex-1 text-xs font-medium py-2.5 rounded-lg bg-gray-700/30 hover:bg-gray-700/50 text-gray-400 border border-gray-600/30 transition-colors"
+          >
+            ✗ Cancel
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================
+// Jarvis Phase 2: Error Inline
+// ============================================
+
+function ErrorInline({ data }: { data?: any }) {
+  if (!data) return null;
+
+  const errorTypes: Record<string, { icon: string; color: string; title: string }> = {
+    wallet_not_connected: { icon: "🔌", color: "text-orange-400 border-orange-500/30 bg-orange-900/20", title: "Wallet Not Connected" },
+    insufficient_balance: { icon: "💸", color: "text-red-400 border-red-500/30 bg-red-900/20", title: "Insufficient Balance" },
+    execution_failed: { icon: "❌", color: "text-red-400 border-red-500/30 bg-red-900/20", title: "Execution Failed" },
+    network_error: { icon: "🌐", color: "text-yellow-400 border-yellow-500/30 bg-yellow-900/20", title: "Network Error" },
+    rejected: { icon: "🚫", color: "text-gray-400 border-gray-500/30 bg-gray-800/40", title: "Transaction Rejected" },
+    default: { icon: "⚡", color: "text-red-400 border-red-500/30 bg-red-900/20", title: "Error" },
+  };
+
+  const style = errorTypes[data.type] || errorTypes.default;
+
+  return (
+    <div className={`rounded-xl border ${style.color.split(" ").slice(1).join(" ")} p-4 space-y-2`}>
+      <div className={`flex items-center gap-2 text-sm font-medium ${style.color.split(" ")[0]}`}>
+        <span>{style.icon}</span> {style.title}
+      </div>
+      <p className="text-xs text-gray-400 leading-relaxed">{data.message}</p>
+      {data.suggestion && (
+        <div className="text-[10px] text-gray-500 bg-gray-800/30 rounded-lg px-2.5 py-1.5 border border-gray-700/30">
+          💡 {data.suggestion}
+        </div>
+      )}
+    </div>
+  );
 }

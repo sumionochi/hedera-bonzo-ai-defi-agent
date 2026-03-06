@@ -107,6 +107,7 @@ interface ChatMessage {
   toolCalls?: { tool: string; output: string }[];
   charts?: ChartType[];
   sentiment?: { score: number; signal: string; confidence: number };
+  actionData?: Record<string, any>; // Data for inline action components
   timestamp: Date;
 }
 
@@ -175,35 +176,18 @@ export default function Home() {
     {
       id: "welcome",
       role: "assistant",
-      content: `### 👋 Welcome to **VaultMind**
-  
-  I'm your **AI DeFi Keeper Agent on Hedera**.  
-  I continuously monitor **Bonzo Finance** and **SaucerSwap** markets, analyze sentiment, and manage vault positions autonomously.
-  
-  ---
-  
-  ### 🚀 Try asking me:
-  
-  - **“Show my portfolio breakdown”**  
-    _Interactive pie chart_
-  
-  - **“How’s the market sentiment?”**  
-    _Live Fear & Greed gauge_
-  
-  - **“Compare APYs across platforms”**  
-    _Bonzo vs SaucerSwap_
-  
-  - **“Show correlation matrix”**  
-    _Asset correlation heat map_
-  
-  - **“Show risk vs return”**  
-    _Scatter plot analysis_
-  
-  - **“Show DeFi opportunities”**  
-    _Yield heat map_`,
+      content:
+        "Welcome to **VaultMind** — your AI DeFi Keeper on Hedera. Every feature is controllable from this chat.\n\n" +
+        "**📊 Analytics**\n• \"Show my portfolio\" — pie chart\n• \"How's the market sentiment?\" — Fear & Greed\n• \"Compare APYs across platforms\" — Bonzo vs SaucerSwap\n• \"Show Bonzo Vault APYs\" — vault comparison\n• \"Show my positions\" — Bonzo Lend health factor\n• \"Show Bonzo markets\" — all reserves + rates\n• \"Show risk vs return\" / \"Show DeFi opportunities\" / \"Show correlation matrix\"\n\n" +
+        "**⚡ Keeper Engine**\n• \"Run dry run\" — analyze without executing\n• \"Execute keeper\" — confirm + execute\n• \"Start auto keeper\" / \"Stop auto keeper\"\n• \"Show decision history\" — past actions\n• \"Show audit log\" — HCS on-chain trail\n• \"Show last 5 HARVEST actions\" — filtered audit\n\n" +
+        "**⚙️ Strategy Config**\n• \"Show strategy config\" — current parameters\n• \"Set bearish threshold to -25\" — adjust risk\n• \"Set confidence minimum to 70\" — require higher confidence\n• \"Set volatility exit to 75\" — tighten exit\n• \"Reset strategy to defaults\"\n\n" +
+        "**💰 Vault Actions**\n• \"Deposit 100 HBAR into HBAR-USDC vault\"\n• \"Withdraw from USDC-USDT vault\"\n• \"Harvest SAUCE-HBAR vault now\"\n• \"Switch vault to stable\"\n\n" +
+        "**🏦 Lending Actions**\n• \"Supply 500 HBAR to Bonzo\"\n• \"Borrow 200 USDC\"\n• \"Repay my USDC loan\"\n\n" +
+        "**👛 Wallet**\n• \"Connect wallet 0.0.XXXXX\" / \"Disconnect wallet\"\n• \"Show my wallet\" — balance & tokens\n\n" +
+        "**📈 Research**\n• \"Show backtest\" — VaultMind vs HODL\n• \"Show price chart\" — OHLCV candlestick",
       timestamp: new Date(),
     },
-  ]);  
+  ]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [marketLoading, setMarketLoading] = useState(true);
@@ -220,6 +204,19 @@ export default function Home() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [activeTab, setActiveTab] = useState<"chat" | "chart" | "audit">("chat");
+
+  // ── Jarvis: Visual pulse when sidebar cards update from chat ──
+  const [sidebarPulse, setSidebarPulse] = useState<Set<string>>(new Set());
+  const pulseCard = (cardName: string) => {
+    setSidebarPulse((prev) => new Set(prev).add(cardName));
+    setTimeout(() => {
+      setSidebarPulse((prev) => {
+        const next = new Set(prev);
+        next.delete(cardName);
+        return next;
+      });
+    }, 3500); // 3.5s — visible enough to notice
+  };
 
   // Wallet connection state (Gap 1)
   const [connectedAccount, setConnectedAccount] = useState<string | null>(null);
@@ -260,54 +257,80 @@ export default function Home() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Auto-loop keeper
+  // Auto-loop keeper — use ref to avoid interval reset on re-renders
+  const keeperRunningRef = useRef(false);
+  const strategyConfigRef = useRef(strategyConfig);
+  strategyConfigRef.current = strategyConfig; // Always current
+
   const runKeeperForLoop = useCallback(async () => {
-    if (keeperRunning) return;
+    if (keeperRunningRef.current) return;
+    keeperRunningRef.current = true;
     setKeeperRunning(true);
     try {
-      const res = await fetch("/api/keeper?execute=false");
+      const res = await fetch("/api/keeper", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          config: strategyConfigRef.current,
+          execute: false,
+        }),
+      });
       const json = await res.json();
       if (json.success) {
         setKeeperResult(json.data);
         setKeeperHistory((prev) => [json.data, ...prev].slice(0, 20));
-        // Propagate HCS topic ID
         if (json.data.hcsLog?.topicId && typeof window !== "undefined") {
           localStorage.setItem("vaultmind_hcs_topic", json.data.hcsLog.topicId);
         }
+        // Jarvis pulse
+        pulseCard("keeper");
+        pulseCard("history");
+        if (json.data.sentiment) pulseCard("sentiment");
       }
     } catch (err: any) {
       console.error("Auto-keeper error:", err);
     } finally {
+      keeperRunningRef.current = false;
       setKeeperRunning(false);
     }
-  }, [keeperRunning]);
+  }, []); // Empty deps — function identity never changes
 
   useEffect(() => {
-    if (autoLoop) {
-      // Run immediately on enable
-      runKeeperForLoop();
-      setCountdown(loopInterval * 60);
-
-      // Set up loop
-      loopTimerRef.current = setInterval(
-        () => {
-          runKeeperForLoop();
-          setCountdown(loopInterval * 60);
-        },
-        loopInterval * 60 * 1000
-      );
-
-      // Countdown ticker
-      countdownRef.current = setInterval(() => {
-        setCountdown((prev) => Math.max(0, prev - 1));
-      }, 1000);
-    } else {
+    if (!autoLoop) {
       if (loopTimerRef.current) clearInterval(loopTimerRef.current);
       if (countdownRef.current) clearInterval(countdownRef.current);
       setCountdown(0);
+      return;
     }
 
+    // Run immediately on enable
+    console.log(`[Auto-Keeper] Started: interval=${loopInterval}min`);
+    runKeeperForLoop();
+    setCountdown(loopInterval * 60);
+
+    // Set up loop — this interval is STABLE (runKeeperForLoop ref never changes)
+    loopTimerRef.current = setInterval(
+      () => {
+        console.log(`[Auto-Keeper] ⏰ Interval fired — running keeper cycle`);
+        runKeeperForLoop();
+        setCountdown(loopInterval * 60);
+      },
+      loopInterval * 60 * 1000
+    );
+
+    // Countdown ticker (every second)
+    let tickCounter = 0;
+    countdownRef.current = setInterval(() => {
+      setCountdown((prev) => Math.max(0, prev - 1));
+      tickCounter++;
+      // Log every 60s so user can see it's alive
+      if (tickCounter % 60 === 0) {
+        console.log(`[Auto-Keeper] ⏳ Next cycle in ~${Math.ceil((loopInterval * 60 - tickCounter) / 60)}min`);
+      }
+    }, 1000);
+
     return () => {
+      console.log("[Auto-Keeper] Stopped / interval changed");
       if (loopTimerRef.current) clearInterval(loopTimerRef.current);
       if (countdownRef.current) clearInterval(countdownRef.current);
     };
@@ -429,6 +452,307 @@ export default function Home() {
     }
   }
 
+  // ── Jarvis: Handle inline component button actions ──
+  async function handleInlineAction(action: string, payload?: any) {
+    const id = (Date.now() + 2).toString();
+
+    if (action === "confirm_execute" && payload?.pendingKeeper) {
+      // Execute the pending keeper decision
+      setIsLoading(true);
+      try {
+        const res = await fetch("/api/keeper?execute=true");
+        const json = await res.json();
+        if (json.success) {
+          setKeeperResult(json.data);
+          setKeeperHistory((prev) => [json.data, ...prev]);
+          pulseCard("keeper");
+          pulseCard("history");
+          setMessages((prev) => [...prev, {
+            id, role: "assistant",
+            content: `⚡ **Executed!** ${json.data.decision?.action} — ${json.data.decision?.reason?.substring(0, 120)}`,
+            charts: ["keeper"],
+            actionData: { keeper: json.data },
+            timestamp: new Date(),
+          }]);
+        }
+      } catch (err: any) {
+        setMessages((prev) => [...prev, {
+          id, role: "assistant",
+          content: `❌ Execution failed.`,
+          charts: ["inlineerror"],
+          actionData: { inlineerror: { type: "execution_failed", message: err.message, suggestion: "Try running a dry run first to check connectivity." } },
+          timestamp: new Date(),
+        }]);
+      }
+      setIsLoading(false);
+
+    } else if (action === "confirm_vault" && payload) {
+      // ── REAL EXECUTION: Route through /api/execute → agent → Bonzo tools ──
+      setIsLoading(true);
+      const vaultAction = payload.action || payload.pendingAction?.vaultAction || "deposit";
+      const execParams = {
+        token: payload.pendingAction?.token || payload.vault?.split(" ")[0] || "HBAR",
+        amount: parseFloat(payload.pendingAction?.amount) || parseFloat(payload.amount) || 100,
+        vault: payload.vault,
+        vaultAddress: payload.pendingAction?.vaultAddress,
+        target: payload.pendingAction?.target || payload.target, // For vault_switch
+      };
+
+      try {
+        const res = await fetch("/api/execute", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: `vault_${vaultAction}`,
+            params: execParams,
+            account: connectedAccount,
+          }),
+        });
+        const json = await res.json();
+
+        if (json.success && json.data.status === "success") {
+          const txIds = json.data.txIds || [];
+          const hashScanLinks = json.data.hashScanLinks || [];
+          setMessages((prev) => [...prev, {
+            id, role: "assistant",
+            content: `⚡ **Vault ${vaultAction} executed on Hedera Testnet!**${txIds.length > 0 ? `\n\n🔗 Transaction: \`${txIds[0]}\`` : ""}\n\n${json.data.agentResponse?.substring(0, 300) || "Transaction submitted successfully."}`,
+            charts: ["vaultaction"],
+            actionData: {
+              vaultaction: {
+                ...payload,
+                status: "executed",
+                txIds,
+                hashScanLinks,
+                toolCalls: json.data.toolCalls,
+                hcsLog: json.data.hcsLog,
+                durationMs: json.data.durationMs,
+              },
+            },
+            timestamp: new Date(),
+          }]);
+          pulseCard("positions");
+          if (connectedAccount) fetchPositions(connectedAccount);
+        } else {
+          setMessages((prev) => [...prev, {
+            id, role: "assistant",
+            content: `❌ **Vault ${vaultAction} failed:** ${json.error || json.data?.agentResponse?.substring(0, 200) || "Unknown error"}\n\nCheck the console for details.`,
+            charts: ["vaultaction"],
+            actionData: {
+              vaultaction: { ...payload, status: "failed", error: json.error || "Execution failed" },
+            },
+            timestamp: new Date(),
+          }]);
+        }
+      } catch (err: any) {
+        setMessages((prev) => [...prev, {
+          id, role: "assistant",
+          content: `❌ **Execution error:** ${err.message}`,
+          charts: ["inlineerror"],
+          actionData: { inlineerror: { type: "execution_failed", message: err.message, suggestion: "Check your HBAR balance and try again." } },
+          timestamp: new Date(),
+        }]);
+      }
+      setIsLoading(false);
+
+    } else if (action === "confirm_lending" && payload) {
+      // ── REAL EXECUTION: Lending actions through /api/execute → Bonzo contracts ──
+      setIsLoading(true);
+      const lendAction = payload.action || payload.pendingAction?.lendAction || "supply";
+      // Detect "all" amounts properly
+      const rawAmount = payload.pendingAction?.amount;
+      const isAll = rawAmount === "all" || String(rawAmount).toLowerCase().startsWith("all");
+      const parsedAmount = isAll ? 0 : (parseFloat(rawAmount) || parseFloat(payload.amount) || 100);
+      const execParams = {
+        token: payload.pendingAction?.asset || payload.asset || "HBAR",
+        amount: parsedAmount,
+        rateMode: payload.pendingAction?.rateMode || "variable",
+      };
+
+      try {
+        const res = await fetch("/api/execute", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: lendAction,
+            params: execParams,
+            account: connectedAccount,
+          }),
+        });
+        const json = await res.json();
+
+        if (json.success && json.data.status === "success") {
+          const txIds = json.data.txIds || [];
+          const hashScanLinks = json.data.hashScanLinks || [];
+          setMessages((prev) => [...prev, {
+            id, role: "assistant",
+            content: `⚡ **Lending ${lendAction} executed on Hedera Testnet!**${txIds.length > 0 ? `\n\n🔗 Transaction: \`${txIds[0]}\`` : ""}\n\n${json.data.agentResponse?.substring(0, 300) || "Transaction submitted successfully."}`,
+            charts: ["lendingaction"],
+            actionData: {
+              lendingaction: {
+                ...payload,
+                status: "executed",
+                txIds,
+                hashScanLinks,
+                toolCalls: json.data.toolCalls,
+                hcsLog: json.data.hcsLog,
+                durationMs: json.data.durationMs,
+              },
+            },
+            timestamp: new Date(),
+          }]);
+          pulseCard("positions");
+          if (connectedAccount) fetchPositions(connectedAccount);
+        } else {
+          setMessages((prev) => [...prev, {
+            id, role: "assistant",
+            content: `❌ **Lending ${lendAction} failed:** ${json.error || json.data?.agentResponse?.substring(0, 200) || "Unknown error"}`,
+            charts: ["lendingaction"],
+            actionData: {
+              lendingaction: { ...payload, status: "failed", error: json.error || "Execution failed" },
+            },
+            timestamp: new Date(),
+          }]);
+        }
+      } catch (err: any) {
+        setMessages((prev) => [...prev, {
+          id, role: "assistant",
+          content: `❌ **Execution error:** ${err.message}`,
+          charts: ["inlineerror"],
+          actionData: { inlineerror: { type: "execution_failed", message: err.message, suggestion: "Check your HBAR balance and try again." } },
+          timestamp: new Date(),
+        }]);
+      }
+      setIsLoading(false);
+      if (connectedAccount) fetchPositions(connectedAccount);
+
+    } else if (action.startsWith("cancel_")) {
+      setMessages((prev) => [...prev, {
+        id, role: "assistant",
+        content: `✓ **Cancelled.** No action was taken. Your positions are unchanged.`,
+        timestamp: new Date(),
+      }]);
+    }
+  }
+
+  // ── Jarvis Mode: detect action commands that need execution ──
+  function detectActionCommand(msg: string): {
+    action: string;
+    execute?: boolean;
+    walletId?: string;
+    params?: Record<string, any>;
+  } | null {
+    const lower = msg.toLowerCase().trim();
+
+    // Keeper commands
+    if (lower.includes("run keeper") || lower.includes("dry run") || lower.includes("keeper cycle") || lower.includes("trigger keeper") || lower.includes("run a keeper") || lower.includes("analyze market")) {
+      return { action: "keeper", execute: false };
+    }
+    if (lower.includes("execute keeper") || lower === "execute" || lower.includes("execute the") || lower.includes("execute now")) {
+      return { action: "keeper_confirm" }; // Now goes through confirmation
+    }
+
+    // Auto-loop commands
+    if (lower.includes("start auto") || lower.includes("enable auto") || lower.includes("auto keeper on") || lower.includes("go autonomous") || lower.includes("autonomous mode")) {
+      // Parse optional interval: "start auto keeper every 2 min" / "start auto 1 minute"
+      const intervalMatch = lower.match(/(\d+)\s*(?:min|minute)/);
+      const interval = intervalMatch ? Math.max(1, Math.min(15, parseInt(intervalMatch[1]))) : undefined;
+      return { action: "start_auto", params: { interval } };
+    }
+    if (lower.includes("stop auto") || lower.includes("disable auto") || lower.includes("auto keeper off") || lower.includes("stop keeper") || lower.includes("pause keeper") || lower.includes("stop autonomous")) {
+      return { action: "stop_auto" };
+    }
+
+    // Wallet connect
+    const walletMatch = lower.match(/connect\s+(?:wallet\s+)?(\d+\.\d+\.\d+)/);
+    if (walletMatch) {
+      return { action: "connect_wallet", walletId: walletMatch[1] };
+    }
+
+    // Wallet disconnect
+    if (lower.includes("disconnect wallet") || lower.includes("disconnect account") || lower.includes("remove wallet") || lower.includes("logout")) {
+      return { action: "disconnect_wallet" };
+    }
+
+    // ── Display-only chart commands (handle locally to give proper response) ──
+    if (lower.includes("price chart") || lower.includes("candlestick") || lower.includes("ohlcv") || lower.includes("show hbar chart")) {
+      return { action: "show_chart", params: { chart: "ohlcv" } };
+    }
+    if (lower.includes("show backtest") || lower.includes("backtest") || lower.includes("vaultmind vs hodl")) {
+      return { action: "show_chart", params: { chart: "performance" } };
+    }
+    if (lower.includes("show audit") || lower.includes("audit log") || lower.includes("hcs log") || lower.includes("on-chain trail")) {
+      return { action: "show_chart", params: { chart: "hcs" } };
+    }
+    if (lower.includes("show decision history") || lower.includes("decision log") || lower.includes("past decisions") || lower.includes("keeper history")) {
+      return { action: "show_chart", params: { chart: "history" } };
+    }
+
+    // ── Strategy Config Commands ──
+    if (lower.includes("show strategy") || lower.includes("show config") || lower.includes("current strategy") || lower.includes("strategy config") || lower.includes("my strategy") || lower.includes("keeper settings")) {
+      return { action: "strategy_show" };
+    }
+    if (lower.includes("reset strategy") || lower.includes("reset config") || lower.includes("default strategy")) {
+      return { action: "strategy_reset" };
+    }
+    // "set bearish threshold to -25" / "set bearish -25"
+    const bearishMatch = lower.match(/set\s+bearish\s+(?:threshold\s+)?(?:to\s+)?(-?\d+)/);
+    if (bearishMatch) return { action: "strategy_set", params: { key: "bearishThreshold", value: parseInt(bearishMatch[1]), label: "Bearish Threshold" } };
+    const bullishMatch = lower.match(/set\s+bullish\s+(?:threshold\s+)?(?:to\s+)?(-?\d+)/);
+    if (bullishMatch) return { action: "strategy_set", params: { key: "bullishThreshold", value: parseInt(bullishMatch[1]), label: "Bullish Threshold" } };
+    const confMatch = lower.match(/set\s+confidence\s+(?:minimum\s+)?(?:to\s+)?(\d+)/);
+    if (confMatch) return { action: "strategy_set", params: { key: "confidenceMinimum", value: parseInt(confMatch[1]) / 100, label: "Confidence Minimum" } };
+    const volMatch = lower.match(/set\s+(?:high\s+)?volatility\s+(?:threshold\s+|exit\s+)?(?:to\s+)?(\d+)/);
+    if (volMatch) return { action: "strategy_set", params: { key: "highVolatilityThreshold", value: parseInt(volMatch[1]), label: "High Volatility Threshold" } };
+    const hfDangerMatch = lower.match(/set\s+(?:health\s+factor\s+)?danger\s+(?:to\s+)?(\d+\.?\d*)/);
+    if (hfDangerMatch) return { action: "strategy_set", params: { key: "healthFactorDanger", value: parseFloat(hfDangerMatch[1]), label: "HF Danger Level" } };
+    const yieldMatch = lower.match(/set\s+(?:min\s+)?yield\s+(?:differential?\s+)?(?:to\s+)?(\d+\.?\d*)/);
+    if (yieldMatch) return { action: "strategy_set", params: { key: "minYieldDifferential", value: parseFloat(yieldMatch[1]), label: "Min Yield Differential" } };
+
+    // ── Vault Action Commands ──
+    // Only match imperative commands, not questions
+    const isQuestion = lower.startsWith("when") || lower.startsWith("how") || lower.startsWith("should") || lower.startsWith("why") || lower.startsWith("what") || lower.startsWith("can") || lower.includes("?");
+
+    // "deposit 100 HBAR into HBAR-USDC vault"
+    const vaultDepositMatch = lower.match(/deposit\s+(\d+\.?\d*)\s*(\w+)\s+(?:into|to)\s+(.+?)(?:\s+vault)?$/);
+    if (vaultDepositMatch && !isQuestion) return { action: "vault_deposit", params: { amount: parseFloat(vaultDepositMatch[1]), token: vaultDepositMatch[2].toUpperCase(), vault: vaultDepositMatch[3].trim() } };
+    // "withdraw from USDC-USDT vault"
+    const vaultWithdrawMatch = lower.match(/withdraw\s+(?:from\s+)?(.+?)(?:\s+vault)?$/);
+    if (vaultWithdrawMatch && lower.includes("vault") && !isQuestion) return { action: "vault_withdraw", params: { vault: vaultWithdrawMatch[1].trim() } };
+    // "harvest SAUCE-HBAR vault" or "harvest now" or "harvest rewards"
+    // But NOT "when should I harvest" or "how to harvest" (questions go to agent)
+    if (lower.includes("harvest") && (lower.includes("vault") || lower.includes("now") || lower.includes("rewards"))) {
+      if (!isQuestion) {
+        const harvestVault = lower.match(/harvest\s+(.+?)(?:\s+vault|\s+now)?$/);
+        return { action: "vault_harvest", params: { vault: harvestVault?.[1]?.replace(/now|rewards|vault/g, "").trim() || "best" } };
+      }
+    }
+    if ((lower.includes("switch vault") || lower.includes("switch to stable")) && !isQuestion) {
+      return { action: "vault_switch", params: { target: "USDC-USDT Stable CLM" } };
+    }
+
+    // ── Lending Action Commands ──
+    // "supply 500 HBAR to Bonzo" / "supply 200 USDC"
+    const supplyMatch = lower.match(/supply\s+(\d+\.?\d*)\s*(\w+)/);
+    if (supplyMatch && !isQuestion) return { action: "lending_supply", params: { amount: parseFloat(supplyMatch[1]), asset: supplyMatch[2].toUpperCase() } };
+    // "borrow 200 USDC"
+    const borrowMatch = lower.match(/borrow\s+(\d+\.?\d*)\s*(\w+)/);
+    if (borrowMatch && !isQuestion) return { action: "lending_borrow", params: { amount: parseFloat(borrowMatch[1]), asset: borrowMatch[2].toUpperCase() } };
+    // "repay my USDC loan" / "repay 100 USDC"
+    const repayMatch = lower.match(/repay\s+(?:my\s+)?(?:(\d+\.?\d*)\s*)?(\w+)/);
+    if (repayMatch && (lower.includes("loan") || lower.includes("debt") || lower.includes("repay"))) {
+      return { action: "lending_repay", params: { amount: repayMatch[1] ? parseFloat(repayMatch[1]) : "all", asset: repayMatch[2].toUpperCase() } };
+    }
+
+    // ── HCS filter commands ──
+    // "show last 5 keeper actions" / "last 5 decisions" / "show 10 entries"
+    const hcsCountMatch = lower.match(/(?:show\s+)?(?:last\s+)?(\d+)\s+(?:keeper\s+)?(?:actions|decisions|entries)/);
+    if (hcsCountMatch) return { action: "hcs_filter", params: { count: parseInt(hcsCountMatch[1]) } };
+    const hcsActionMatch = lower.match(/show\s+(?:only\s+)?(\w+)\s+(?:actions|decisions)/);
+    if (hcsActionMatch) return { action: "hcs_filter", params: { filterAction: hcsActionMatch[1].toUpperCase() } };
+
+    return null;
+  }
+
   async function handleSend() {
     if (!input.trim() || isLoading) return;
 
@@ -444,6 +768,408 @@ export default function Home() {
     setIsLoading(true);
 
     try {
+      const detectedCharts = detectCharts(userMessage.content);
+      const actionCmd = detectActionCommand(userMessage.content);
+
+      // ── Handle action commands locally ──
+      if (actionCmd) {
+        let responseContent = "";
+        let actionData: Record<string, any> = {};
+
+        if (actionCmd.action === "keeper") {
+          // ── JARVIS: Mirror sidebar behavior exactly ──
+          setKeeperRunning(true); // Show spinner in sidebar
+          pulseCard("keeper");    // Immediate glow = "I'm working on it"
+
+          // Use POST with strategyConfig (same as sidebar manual run)
+          const res = await fetch("/api/keeper", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              config: strategyConfig,
+              execute: actionCmd.execute || false,
+            }),
+          });
+          const json = await res.json();
+          setKeeperRunning(false); // Stop spinner
+
+          if (json.success) {
+            const d = json.data;
+            // ── JARVIS: Update ALL related sidebar state ──
+            setKeeperResult(d);
+            setKeeperHistory((prev) => [d, ...prev]);
+
+            // Update sidebar sentiment card with keeper's fresh sentiment
+            if (d.sentiment) {
+              setSentiment((prev) => prev ? {
+                ...prev,
+                score: d.sentiment.score,
+                signal: d.sentiment.signal,
+                confidence: d.sentiment.confidence,
+              } : prev);
+            }
+
+            // Update sidebar positions card if keeper returned portfolio
+            if (d.portfolio) {
+              setPortfolio(d.portfolio);
+            }
+
+            // Save HCS topic ID so Audit tab can find it
+            if (d.hcsLog?.topicId && typeof window !== "undefined") {
+              localStorage.setItem("vaultmind_hcs_topic", d.hcsLog.topicId);
+            }
+
+            // ── JARVIS: Pulse ALL affected sidebar cards ──
+            pulseCard("keeper");
+            pulseCard("history");
+            if (d.sentiment) pulseCard("sentiment");
+            if (d.portfolio) pulseCard("positions");
+
+            const lendAction = d.decision?.action || "N/A";
+            const vaultAction = d.vaultDecision?.action || "N/A";
+            responseContent = actionCmd.execute
+              ? `⚡ **Keeper executed.** Lending: **${lendAction}** — ${d.decision?.reason || "No reason"}\n\nVault: **${vaultAction}** — ${d.vaultDecision?.reason || "No vault decision"}`
+              : `🔍 **Keeper dry run complete.** Lending recommends **${lendAction}** — ${d.decision?.reason || "No reason"}\n\nVault recommends **${vaultAction}** — ${d.vaultDecision?.reason || "No vault decision"}`;
+            actionData.keeper = d;
+          } else {
+            responseContent = `Keeper error: ${json.error}`;
+            actionData.inlineerror = { type: "execution_failed", message: json.error || "Keeper cycle failed", suggestion: "Check your .env.local credentials and try again." };
+            if (!detectedCharts.includes("inlineerror")) detectedCharts.push("inlineerror");
+          }
+          // Always show keeper inline
+          if (!detectedCharts.includes("keeper")) detectedCharts.push("keeper");
+
+        } else if (actionCmd.action === "start_auto") {
+          // Set interval if specified: "start auto keeper every 2 min"
+          const requestedInterval = actionCmd.params?.interval;
+          if (requestedInterval) {
+            setLoopInterval(requestedInterval);
+          }
+          setAutoLoop(true);
+          pulseCard("keeper");
+          const finalInterval = requestedInterval || loopInterval;
+          responseContent = `✅ **Auto-keeper started.** Running every **${finalInterval} minute(s)**. I'll continuously monitor markets and log decisions to HCS. Say "stop auto keeper" to pause.`;
+
+        } else if (actionCmd.action === "stop_auto") {
+          setAutoLoop(false);
+          pulseCard("keeper");
+          responseContent = `⏸️ **Auto-keeper stopped.** I've paused autonomous monitoring. Run "dry run" anytime for a one-shot analysis, or "start auto keeper" to resume.`;
+
+        } else if (actionCmd.action === "connect_wallet" && actionCmd.walletId) {
+          const wId = actionCmd.walletId;
+          try {
+            // Fetch account data from Mirror Node
+            const res = await fetch(`https://testnet.mirrornode.hedera.com/api/v1/accounts/${wId}`);
+            if (res.ok) {
+              const accData = await res.json();
+              const hbarBalance = parseInt(accData.balance?.balance || "0") / 1e8;
+
+              // Fetch HBAR price for USD value
+              let hbarPrice = 0;
+              try {
+                const pr = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=hedera-hashgraph&vs_currencies=usd");
+                if (pr.ok) { const pd = await pr.json(); hbarPrice = pd["hedera-hashgraph"]?.usd || 0; }
+              } catch {}
+
+              // Fetch token balances
+              let tokens: any[] = [];
+              try {
+                const tr = await fetch(`https://testnet.mirrornode.hedera.com/api/v1/accounts/${wId}/tokens?limit=25`);
+                if (tr.ok) {
+                  const td = await tr.json();
+                  tokens = (td.tokens || [])
+                    .filter((t: any) => parseInt(t.balance) > 0)
+                    .map((t: any) => ({
+                      tokenId: t.token_id,
+                      symbol: t.token_id, // Could map known tokens
+                      balance: parseInt(t.balance) / 1e8,
+                      decimals: 8,
+                    }));
+                }
+              } catch {}
+
+              const hbarBalanceUSD = Math.round(hbarBalance * hbarPrice * 100) / 100;
+              const wd = {
+                accountId: wId,
+                hbarBalance: Math.round(hbarBalance * 10000) / 10000,
+                hbarBalanceUSD,
+                tokens,
+                evmAddress: accData.evm_address || "",
+                network: "testnet" as const,
+              };
+              setConnectedAccount(wId);
+              setWalletData(wd);
+              fetchPositions(wId);
+              pulseCard("wallet");
+              pulseCard("positions");
+              localStorage.setItem("vaultmind_account", wId);
+              localStorage.setItem("vaultmind_wallet_mode", "manual");
+              // Background: pre-associate required tokens for DeFi operations
+              fetch("/api/associate", { method: "POST" }).then(r => r.json()).then(d => {
+                console.log("[Wallet] Token associations:", d.results?.map((r: any) => `${r.symbol}:${r.status}`).join(", "));
+              }).catch(() => {});
+              responseContent = `👛 **Wallet connected: ${wId}**\nHBAR Balance: **${wd.hbarBalance.toLocaleString()} HBAR** (~$${hbarBalanceUSD.toFixed(2)})\n${tokens.length > 0 ? `Tokens: ${tokens.length} found` : "No additional tokens"}\nAll portfolio and position queries will now use this account.`;
+              actionData.walletinfo = wd;
+              if (!detectedCharts.includes("walletinfo")) detectedCharts.push("walletinfo");
+            } else {
+              responseContent = `❌ Account ${wId} not found on Hedera Testnet. Check the account ID format (0.0.XXXXX).`;
+            }
+          } catch (err: any) {
+            responseContent = `❌ Failed to connect: ${err.message}`;
+          }
+
+        } else if (actionCmd.action === "disconnect_wallet") {
+          setConnectedAccount(null);
+          setWalletData(null);
+          setPortfolio(null);
+          pulseCard("wallet");
+          localStorage.removeItem("vaultmind_account");
+          localStorage.removeItem("vaultmind_wallet_mode");
+          responseContent = `🔌 **Wallet disconnected.** Sidebar wallet card cleared. Say "connect wallet 0.0.XXXXX" to reconnect.`;
+
+        // ── Strategy Config Commands ──
+        } else if (actionCmd.action === "strategy_show") {
+          actionData.strategyconfig = { config: strategyConfig, action: "show" };
+          if (!detectedCharts.includes("strategyconfig")) detectedCharts.push("strategyconfig");
+          responseContent = `⚙️ Here's your current keeper strategy configuration. You can modify any parameter by saying:\n• "Set bearish threshold to -25"\n• "Set confidence minimum to 70"\n• "Set volatility exit to 75"\n• "Reset strategy to defaults"`;
+
+        } else if (actionCmd.action === "strategy_reset") {
+          const oldConfig = { ...strategyConfig };
+          const defaults = { bearishThreshold: -30, bullishThreshold: 50, confidenceMinimum: 0.6, healthFactorDanger: 1.3, healthFactorTarget: 1.8, highVolatilityThreshold: 80, minYieldDifferential: 2.0 };
+          setStrategyConfig(defaults);
+          pulseCard("strategyconfig");
+          const changes = Object.entries(defaults)
+            .filter(([k, v]) => (oldConfig as any)[k] !== v)
+            .map(([k, v]) => ({ label: k, old: (oldConfig as any)[k], new: v }));
+          actionData.strategyconfig = { config: defaults, changes, action: "reset" };
+          if (!detectedCharts.includes("strategyconfig")) detectedCharts.push("strategyconfig");
+          responseContent = changes.length > 0
+            ? `🔄 **Strategy reset to defaults.** ${changes.length} parameter(s) changed. The keeper will use these on the next cycle.`
+            : `⚙️ Strategy was already at defaults. No changes needed.`;
+
+        } else if (actionCmd.action === "strategy_set" && actionCmd.params) {
+          const { key, value, label } = actionCmd.params;
+          const oldVal = (strategyConfig as any)[key];
+          // Validate
+          let valid = true;
+          let validationMsg = "";
+          if (key === "bearishThreshold" && (value < -100 || value > 0)) { valid = false; validationMsg = "Bearish threshold must be between -100 and 0"; }
+          if (key === "bullishThreshold" && (value < 0 || value > 100)) { valid = false; validationMsg = "Bullish threshold must be between 0 and 100"; }
+          if (key === "confidenceMinimum" && (value < 0 || value > 1)) { valid = false; validationMsg = "Confidence must be between 0% and 100%"; }
+          if (key === "healthFactorDanger" && (value < 1 || value > 3)) { valid = false; validationMsg = "HF danger must be between 1.0 and 3.0"; }
+          if (key === "highVolatilityThreshold" && (value < 10 || value > 100)) { valid = false; validationMsg = "Volatility threshold must be between 10% and 100%"; }
+
+          if (!valid) {
+            actionData.inlineerror = { type: "default", message: validationMsg, suggestion: `Try a value in the valid range for ${label}.` };
+            if (!detectedCharts.includes("inlineerror")) detectedCharts.push("inlineerror");
+            responseContent = `❌ Invalid value for **${label}**: ${validationMsg}`;
+          } else {
+            setStrategyConfig(prev => ({ ...prev, [key]: value }));
+            pulseCard("strategyconfig");
+            const changes = [{ label, old: oldVal, new: value }];
+            actionData.strategyconfig = { config: { ...strategyConfig, [key]: value }, changes, action: "update" };
+            if (!detectedCharts.includes("strategyconfig")) detectedCharts.push("strategyconfig");
+            responseContent = `✅ **${label}** updated: ${oldVal} → **${value}**. The keeper will use this on its next cycle.`;
+          }
+
+        // ── Keeper Execute with Confirmation ──
+        } else if (actionCmd.action === "keeper_confirm") {
+          // First do a dry run to show what will happen
+          const res = await fetch("/api/keeper");
+          const json = await res.json();
+          if (json.success) {
+            const d = json.data;
+            const action = d.decision?.action || "HOLD";
+            actionData.confirm = {
+              description: `Execute keeper decision: **${action}**`,
+              details: [
+                { label: "Lending Action", value: d.decision?.action || "N/A" },
+                { label: "Vault Action", value: d.vaultDecision?.action || "N/A" },
+                { label: "Confidence", value: `${((d.decision?.confidence || 0) * 100).toFixed(0)}%` },
+                { label: "Sentiment", value: `${d.sentiment?.score > 0 ? "+" : ""}${d.sentiment?.score || 0}` },
+              ],
+              warning: action !== "HOLD" ? "This will execute a real transaction on Hedera Testnet." : undefined,
+              pendingKeeper: d,
+            };
+            if (!detectedCharts.includes("confirm")) detectedCharts.push("confirm");
+            responseContent = `🔒 **Confirmation required.** I've analyzed the market. Review the details below and confirm to execute.`;
+          } else {
+            actionData.inlineerror = { type: "execution_failed", message: json.error || "Keeper analysis failed", suggestion: "Check your .env.local credentials and try again." };
+            if (!detectedCharts.includes("inlineerror")) detectedCharts.push("inlineerror");
+            responseContent = `❌ Keeper analysis failed: ${json.error}`;
+          }
+
+        // ── Vault Action Commands ──
+        } else if (actionCmd.action?.startsWith("vault_")) {
+          if (!connectedAccount) {
+            actionData.inlineerror = { type: "wallet_not_connected", message: "You need to connect a wallet before performing vault actions.", suggestion: 'Say "connect wallet 0.0.XXXXX" to connect.' };
+            if (!detectedCharts.includes("inlineerror")) detectedCharts.push("inlineerror");
+            responseContent = `🔌 **Wallet not connected.** Please connect first with "connect wallet 0.0.XXXXX".`;
+          } else {
+            const p = actionCmd.params || {};
+            const vaultAction = actionCmd.action.replace("vault_", "");
+            // Find matching vault for APY
+            const vaults = vaultData?.vaults || [];
+            const matchedVault = vaults.find((v: any) => v.name?.toLowerCase().includes(p.vault?.toLowerCase())) || vaults[0];
+
+            actionData.vaultaction = {
+              action: vaultAction,
+              vault: vaultAction === "switch" ? (p.target || "USDC-USDT Stable CLM") : (matchedVault?.name || p.vault || "Best Available"),
+              amount: p.amount ? `${p.amount} ${p.token || ""}` : "Full position",
+              expectedApy: matchedVault?.apy?.toFixed(1) || "~8",
+              estimatedGas: "~0.02 HBAR",
+              riskWarning: vaultAction === "deposit" && matchedVault?.risk === "high" ? "This is a high-risk leveraged vault. Consider USDC-USDT Stable for lower risk." : undefined,
+              status: "preview",
+              pendingAction: { ...p, vaultAction, vaultAddress: matchedVault?.address, target: p.target },
+            };
+            if (!detectedCharts.includes("vaultaction")) detectedCharts.push("vaultaction");
+            responseContent = `${vaultAction === "deposit" ? "💰" : vaultAction === "withdraw" ? "📤" : vaultAction === "harvest" ? "🌾" : "🔄"} **Vault ${vaultAction} preview ready.** Review the details below and confirm to proceed.`;
+          }
+
+        // ── Lending Action Commands ──
+        } else if (actionCmd.action?.startsWith("lending_")) {
+          if (!connectedAccount) {
+            actionData.inlineerror = { type: "wallet_not_connected", message: "You need to connect a wallet before performing lending actions.", suggestion: 'Say "connect wallet 0.0.XXXXX" to connect.' };
+            if (!detectedCharts.includes("inlineerror")) detectedCharts.push("inlineerror");
+            responseContent = `🔌 **Wallet not connected.** Please connect first.`;
+          } else {
+            const p = actionCmd.params || {};
+            const lendAction = actionCmd.action.replace("lending_", "");
+            // Find current APY for asset
+            const market = markets.find((m: any) => m.symbol?.toUpperCase() === p.asset?.toUpperCase());
+            const currentHf = portfolio?.healthFactor || 999;
+            // Estimate HF impact
+            let hfAfter = currentHf;
+            if (lendAction === "borrow") hfAfter = Math.max(currentHf * 0.7, 1.0);
+            if (lendAction === "supply") hfAfter = currentHf * 1.3;
+            if (lendAction === "repay") hfAfter = Math.min(currentHf * 1.5, 999);
+            if (lendAction === "withdraw") hfAfter = Math.max(currentHf * 0.8, 1.0);
+
+            actionData.lendingaction = {
+              action: lendAction,
+              asset: p.asset,
+              amount: p.amount === "all" ? `All ${p.asset}` : `${p.amount} ${p.asset}`,
+              currentApy: lendAction === "borrow" ? market?.borrowAPY?.toFixed(2) : market?.supplyAPY?.toFixed(2),
+              healthFactorBefore: currentHf < 100 ? currentHf : undefined,
+              healthFactorAfter: hfAfter < 100 ? hfAfter : undefined,
+              liquidationRisk: hfAfter < 1.3 ? `Health factor will drop to ${hfAfter.toFixed(2)} — LIQUIDATION RISK. Consider a smaller amount.` : undefined,
+              status: "preview",
+              pendingAction: { ...p, lendAction },
+            };
+            if (!detectedCharts.includes("lendingaction")) detectedCharts.push("lendingaction");
+            responseContent = `🏦 **${lendAction.charAt(0).toUpperCase() + lendAction.slice(1)} preview ready.** Review details including health factor impact below.`;
+          }
+
+        // ── Display-only chart commands (local response + inline component) ──
+        } else if (actionCmd.action === "show_chart") {
+          const chart = actionCmd.params?.chart;
+          if (chart === "ohlcv") {
+            if (!detectedCharts.includes("ohlcv")) detectedCharts.push("ohlcv");
+            responseContent = "📈 Here's the **30-day HBAR price chart** with daily close prices, highs, and lows:";
+          } else if (chart === "performance") {
+            if (!detectedCharts.includes("performance")) detectedCharts.push("performance");
+            responseContent = "📈 Running **VaultMind vs HODL backtest** over the last 30 days. This simulates keeper decisions against real HBAR price data:";
+          } else if (chart === "hcs") {
+            if (!detectedCharts.includes("hcs")) detectedCharts.push("hcs");
+            responseContent = "📋 Here's your **HCS on-chain audit trail** — every keeper decision logged immutably on Hedera:";
+          } else if (chart === "history") {
+            if (!detectedCharts.includes("history")) detectedCharts.push("history");
+            actionData.history = { history: keeperHistory };
+            responseContent = keeperHistory.length > 0
+              ? `📋 Showing **${keeperHistory.length} keeper decisions** from this session:`
+              : "📋 No keeper decisions yet this session. Try **\"run dry run\"** to analyze the market first.";
+          }
+
+        // ── HCS Filtered Query ──
+        } else if (actionCmd.action === "hcs_filter") {
+          const p = actionCmd.params || {};
+          actionData.hcs = { filterAction: p.filterAction, filterCount: p.count || 10 };
+          if (!detectedCharts.includes("hcs")) detectedCharts.push("hcs");
+          responseContent = p.filterAction
+            ? `📋 Showing **${p.filterAction}** actions from the HCS audit trail:`
+            : `📋 Showing last **${p.count || 10}** audit trail entries:`;
+        }
+
+        // Inject state data for display-only components
+        if (detectedCharts.includes("history")) {
+          actionData.history = { history: keeperHistory };
+        }
+        if (detectedCharts.includes("walletinfo") && !actionData.walletinfo) {
+          actionData.walletinfo = walletData ? { ...walletData, accountId: connectedAccount } : null;
+        }
+        if (detectedCharts.includes("positions") && portfolio) {
+          actionData.positions = { ...portfolio, accountId: connectedAccount };
+        }
+
+        const assistantMessage: ChatMessage = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: responseContent,
+          charts: detectedCharts.length > 0 ? detectedCharts : undefined,
+          actionData: Object.keys(actionData).length > 0 ? actionData : undefined,
+          timestamp: new Date(),
+        };
+        setMessages((prev) => [...prev, assistantMessage]);
+        setIsLoading(false);
+        return;
+      }
+
+      // ── Build actionData for display-only commands ──
+      let actionData: Record<string, any> = {};
+      if (detectedCharts.includes("history")) {
+        actionData.history = { history: keeperHistory };
+      }
+      if (detectedCharts.includes("walletinfo")) {
+        actionData.walletinfo = walletData ? { ...walletData, accountId: connectedAccount } : null;
+      }
+      if (detectedCharts.includes("positions") && portfolio) {
+        actionData.positions = { ...portfolio, accountId: connectedAccount };
+      }
+      if (detectedCharts.includes("market") && markets.length > 0) {
+        actionData.market = { markets };
+      }
+
+      // ── LOCAL DISPLAY HANDLER ──
+      // Chart-only commands are handled locally. The agent doesn't know about
+      // our inline components and says "I can't display charts" — so we intercept
+      // these and render them ourselves with a brief intro message.
+      // Charts NOT in this list go to the agent (portfolio, sentiment, apy, positions, walletinfo)
+      // because the agent has tools that add valuable context for those.
+      const LOCAL_CHART_MESSAGES: Record<string, string> = {
+        ohlcv: "📈 Here's the **30-day HBAR price chart** from SaucerSwap OHLCV data:",
+        correlation: "🔗 Here's the **asset correlation matrix** (30-day rolling window). Values near +1 move together, near -1 move opposite:",
+        riskreturn: "📊 Here's the **risk vs return scatter** for Hedera DeFi assets (30-day annualized). Bubble size = Sharpe ratio:",
+        heatmap: "🗺️ Here's the **DeFi opportunities heat map** across all Bonzo Lend markets, sorted by supply APY:",
+        performance: "📈 Here's the **VaultMind vs HODL backtest** — 30 days, $1,000 initial investment. VaultMind uses the keeper's strategies while HODL just holds HBAR:",
+        market: "🏦 Here's the **Bonzo Lend market overview** with all active reserves, supply/borrow APYs, and utilization rates:",
+        hcs: "📋 Here's the **HCS Audit Trail** — every keeper decision logged immutably on Hedera Consensus Service. Verify any entry on HashScan:",
+        history: "📜 Here's the **keeper decision history** from this session:",
+        vaultcompare: "🏦 Here's the **Bonzo Vault comparison** — CLM vaults auto-manage concentrated liquidity ranges on SaucerSwap V2:",
+        positions: "📊 Here's your **Bonzo Lend positions** — live data from the Bonzo Finance protocol:",
+        walletinfo: "👛 Here's your **wallet info** — live from Hedera Mirror Node:",
+        apycompare: "📊 Here's the **APY comparison** across Bonzo Lend supply, borrow, and vault strategies:",
+      };
+
+      // Check if ALL detected charts can be handled locally
+      const localCharts = detectedCharts.filter(c => c in LOCAL_CHART_MESSAGES);
+      if (localCharts.length > 0 && localCharts.length === detectedCharts.length) {
+        // Pure display command — handle locally, don't send to agent
+        const responseContent = localCharts.map(c => LOCAL_CHART_MESSAGES[c]).join("\n\n");
+
+        const assistantMessage: ChatMessage = {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: responseContent,
+          charts: detectedCharts,
+          actionData: Object.keys(actionData).length > 0 ? actionData : undefined,
+          timestamp: new Date(),
+        };
+        setMessages((prev) => [...prev, assistantMessage]);
+        setIsLoading(false);
+        return;
+      }
+
+      // ── Send to agent for AI response ──
       const res = await fetch("/api/agent", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -451,15 +1177,11 @@ export default function Home() {
           message: userMessage.content,
           threadId: "vaultmind-session",
           connectedAccount: connectedAccount || undefined,
+          strategyConfig: strategyConfig,
         }),
       });
 
       const json = await res.json();
-
-      // Only detect charts from USER QUERY — not the agent response
-      // The agent response mentions "risk", "vault", "portfolio" in almost every
-      // answer, causing unrelated charts to appear
-      const detectedCharts = detectCharts(userMessage.content);
 
       const assistantMessage: ChatMessage = {
         id: (Date.now() + 1).toString(),
@@ -470,6 +1192,7 @@ export default function Home() {
         toolCalls: json.data?.toolCalls,
         charts: detectedCharts.length > 0 ? detectedCharts : undefined,
         sentiment: json.data?.sentiment,
+        actionData: Object.keys(actionData).length > 0 ? actionData : undefined,
         timestamp: new Date(),
       };
 
@@ -546,40 +1269,76 @@ export default function Home() {
           {/* Left: Dashboard Panels */}
           <div className="lg:col-span-1 space-y-4 overflow-y-auto max-h-[calc(100vh-120px)]">
             {/* Wallet Connection (Gap 1) */}
-            <WalletConnect
-              connectedAccount={connectedAccount}
-              onConnect={(id, data) => {
-                setConnectedAccount(id);
-                setWalletData(data);
-                fetchPositions(id);
-              }}
-              onDisconnect={() => {
-                setConnectedAccount(null);
-                setWalletData(null);
-              }}
-            />
+            <div style={{ 
+              transition: "box-shadow 0.5s ease-in-out, border-color 0.5s ease-in-out, transform 0.3s ease-in-out",
+              boxShadow: sidebarPulse.has("wallet") ? "0 0 30px rgba(16,185,129,0.5), 0 0 60px rgba(16,185,129,0.2), inset 0 0 15px rgba(16,185,129,0.05)" : "none",
+              transform: sidebarPulse.has("wallet") ? "scale(1.01)" : "scale(1)",
+              borderRadius: "0.75rem",
+            }}>
+              <WalletConnect
+                connectedAccount={connectedAccount}
+                externalWalletData={walletData}
+                onConnect={(id, data) => {
+                  setConnectedAccount(id);
+                  setWalletData(data);
+                  fetchPositions(id);
+                }}
+                onDisconnect={() => {
+                  setConnectedAccount(null);
+                  setWalletData(null);
+                }}
+              />
+            </div>
 
             {/* Keeper Controls */}
-            <KeeperPanel
-              result={keeperResult}
-              running={keeperRunning}
-              onRun={runKeeper}
-              autoLoop={autoLoop}
-              onToggleLoop={() => setAutoLoop(!autoLoop)}
-              loopInterval={loopInterval}
-              onSetInterval={setLoopInterval}
-              countdown={countdown}
-              historyCount={keeperHistory.length}
-            />
+            <div style={{ 
+              transition: "box-shadow 0.5s ease-in-out, transform 0.3s ease-in-out",
+              boxShadow: sidebarPulse.has("keeper") ? "0 0 30px rgba(16,185,129,0.5), 0 0 60px rgba(16,185,129,0.2), inset 0 0 15px rgba(16,185,129,0.05)" : "none",
+              transform: sidebarPulse.has("keeper") ? "scale(1.01)" : "scale(1)",
+              borderRadius: "0.75rem",
+            }}>
+              <KeeperPanel
+                result={keeperResult}
+                running={keeperRunning}
+                onRun={runKeeper}
+                autoLoop={autoLoop}
+                onToggleLoop={() => setAutoLoop(!autoLoop)}
+                loopInterval={loopInterval}
+                onSetInterval={setLoopInterval}
+                countdown={countdown}
+                historyCount={keeperHistory.length}
+              />
+            </div>
 
             {/* Positions */}
-            <PositionsCard portfolio={portfolio} loading={positionsLoading} />
+            <div style={{ 
+              transition: "box-shadow 0.5s ease-in-out, transform 0.3s ease-in-out",
+              boxShadow: sidebarPulse.has("positions") ? "0 0 30px rgba(59,130,246,0.5), 0 0 60px rgba(59,130,246,0.2), inset 0 0 15px rgba(59,130,246,0.05)" : "none",
+              transform: sidebarPulse.has("positions") ? "scale(1.01)" : "scale(1)",
+              borderRadius: "0.75rem",
+            }}>
+              <PositionsCard portfolio={portfolio} loading={positionsLoading} />
+            </div>
 
             {/* Sentiment Card */}
-            <SentimentCard sentiment={sentiment} loading={marketLoading} />
+            <div style={{ 
+              transition: "box-shadow 0.5s ease-in-out, transform 0.3s ease-in-out",
+              boxShadow: sidebarPulse.has("sentiment") ? "0 0 30px rgba(251,191,36,0.5), 0 0 60px rgba(251,191,36,0.2), inset 0 0 15px rgba(251,191,36,0.05)" : "none",
+              transform: sidebarPulse.has("sentiment") ? "scale(1.01)" : "scale(1)",
+              borderRadius: "0.75rem",
+            }}>
+              <SentimentCard sentiment={sentiment} loading={marketLoading} />
+            </div>
 
             {/* Bonzo Vaults */}
-            <VaultCard data={vaultData} loading={vaultLoading} />
+            <div style={{ 
+              transition: "box-shadow 0.5s ease-in-out, transform 0.3s ease-in-out",
+              boxShadow: sidebarPulse.has("vaults") ? "0 0 30px rgba(168,85,247,0.5), 0 0 60px rgba(168,85,247,0.2), inset 0 0 15px rgba(168,85,247,0.05)" : "none",
+              transform: sidebarPulse.has("vaults") ? "scale(1.01)" : "scale(1)",
+              borderRadius: "0.75rem",
+            }}>
+              <VaultCard data={vaultData} loading={vaultLoading} />
+            </div>
 
             {/* Market Overview */}
             <MarketCard
@@ -590,7 +1349,14 @@ export default function Home() {
 
             {/* Decision History */}
             {keeperHistory.length > 0 && (
-              <DecisionHistoryCard history={keeperHistory} />
+              <div style={{ 
+                transition: "box-shadow 0.5s ease-in-out, transform 0.3s ease-in-out",
+                boxShadow: sidebarPulse.has("history") ? "0 0 30px rgba(168,85,247,0.5), 0 0 60px rgba(168,85,247,0.2), inset 0 0 15px rgba(168,85,247,0.05)" : "none",
+                transform: sidebarPulse.has("history") ? "scale(1.01)" : "scale(1)",
+                borderRadius: "0.75rem",
+              }}>
+                <DecisionHistoryCard history={keeperHistory} />
+              </div>
             )}
 
             {/* Strategy Config (Gap 5 + Gap 4 Price Alerts) */}
@@ -674,7 +1440,8 @@ export default function Home() {
             <div className="rounded-b-xl rounded-tr-xl border border-gray-800/60 bg-gray-900/20 overflow-hidden flex-1">
               {/* Chat Tab */}
               {activeTab === "chat" && (
-                <div className="flex flex-col h-[calc(100vh-140px)]">            {/* Chat Header */}
+                <div className="flex flex-col min-h-[550px] h-full">
+            {/* Chat Header */}
             <div className="px-4 py-3 border-b border-gray-800/40 flex items-center gap-2">
               <Zap className="w-4 h-4 text-emerald-400" />
               <span className="text-sm font-medium text-gray-300">
@@ -717,6 +1484,8 @@ export default function Home() {
                             key={chartType}
                             type={chartType}
                             sentiment={msg.sentiment}
+                            data={msg.actionData?.[chartType] || msg.actionData}
+                            onAction={handleInlineAction}
                           />
                         ))}
                       </div>
@@ -795,7 +1564,7 @@ export default function Home() {
               {/* Audit Tab */}
               {activeTab === "audit" && (
                 <div className="p-4">
-                  <HCSTimeline />
+                  <HCSTimeline refreshTrigger={keeperHistory.length} />
                 </div>
               )}
             </div>
@@ -944,6 +1713,40 @@ function getDynamicSuggestions(
       "Show market sentiment"
     );
   }
+  // New Jarvis component reactions
+  if (lastCharts.includes("keeper")) {
+    suggestions.push("Execute keeper", "Show decision history", "Show audit log");
+  }
+  if (lastCharts.includes("positions")) {
+    suggestions.push("Run dry run", "Supply 100 HBAR to Bonzo", "Show strategy config");
+  }
+  if (lastCharts.includes("hcs")) {
+    suggestions.push("Show last 5 HARVEST actions", "Run dry run", "Show decision history");
+  }
+  if (lastCharts.includes("performance")) {
+    suggestions.push("Run dry run", "Show strategy config", "Compare Bonzo Vault APYs");
+  }
+  if (lastCharts.includes("market")) {
+    suggestions.push("Supply 500 HBAR to Bonzo", "Compare APYs across platforms", "Show DeFi opportunities");
+  }
+  if (lastCharts.includes("walletinfo")) {
+    suggestions.push("Show my positions", "Show my portfolio breakdown", "Run dry run");
+  }
+  if (lastCharts.includes("strategyconfig")) {
+    suggestions.push("Run dry run", "Set bearish threshold to -25", "Reset strategy to defaults");
+  }
+  if (lastCharts.includes("vaultaction")) {
+    suggestions.push("Show Bonzo Vault APYs", "Show my positions", "Show audit log");
+  }
+  if (lastCharts.includes("lendingaction")) {
+    suggestions.push("Show my positions", "Show Bonzo markets", "Run dry run");
+  }
+  if (lastCharts.includes("confirm")) {
+    suggestions.push("Run dry run", "Show strategy config", "Show audit log");
+  }
+  if (lastCharts.includes("inlineerror")) {
+    suggestions.push("Connect wallet 0.0.5907362", "Run dry run", "Show my wallet");
+  }
   if (suggestions.length > 0) return suggestions.slice(0, 3);
 
   // ── React to assistant response topics ──
@@ -1012,18 +1815,18 @@ function getDynamicSuggestions(
 
   // ── Conversation depth phases ──
   if (msgCount <= 2) {
-    return ["Show my portfolio breakdown", "Compare Bonzo Vault APYs", "How's the market sentiment?"];
+    return ["Run dry run", "Show my portfolio breakdown", "How's the market sentiment?"];
   }
   if (msgCount <= 5) {
-    return ["Which vault is best for safe yield?", "Compare APYs across platforms", "Show DeFi heat map"];
+    return ["Show strategy config", "Compare Bonzo Vault APYs", "Show backtest"];
   }
   if (msgCount <= 8) {
-    return ["Show vault vs lending comparison", "What's the leveraged HBARX strategy?", "Run keeper dry run"];
+    return ["Execute keeper", "Deposit 100 HBAR into HBAR-USDC vault", "Show audit log"];
   }
   if (msgCount <= 12) {
-    return ["Deposit 100 HBAR into Bonzo", "Should I harvest vaults now?", "Start auto-keeper"];
+    return ["Start auto keeper", "Set bearish threshold to -25", "Supply 500 HBAR to Bonzo"];
   }
-  return ["Compare vault harvest timing", "Where can I earn more?", "Show market sentiment"];
+  return ["Run dry run", "Show last 5 HARVEST actions", "Compare APYs across platforms"];
 }
 
 function formatCountdown(seconds: number): string {
@@ -1057,6 +1860,20 @@ function KeeperPanel({
   countdown: number;
   historyCount: number;
 }) {
+  const [justUpdated, setJustUpdated] = useState(false);
+  const prevResultRef = useRef<string | null>(null);
+
+  // Flash "just updated" when result changes (including from chat commands)
+  useEffect(() => {
+    const resultKey = result ? `${result.decision?.action}-${result.timestamp}` : null;
+    if (resultKey && resultKey !== prevResultRef.current) {
+      prevResultRef.current = resultKey;
+      setJustUpdated(true);
+      const timer = setTimeout(() => setJustUpdated(false), 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [result]);
+
   const actionColors: Record<string, string> = {
     HOLD: "text-yellow-400 bg-yellow-400/10 border-yellow-400/20",
     HARVEST: "text-red-400 bg-red-400/10 border-red-400/20",
@@ -1068,11 +1885,16 @@ function KeeperPanel({
   };
 
   return (
-    <div className="rounded-xl border border-gray-800/60 bg-gray-900/40 p-4 card-glow">
+    <div className={`rounded-xl border ${justUpdated ? "border-emerald-500/40" : "border-gray-800/60"} bg-gray-900/40 p-4 card-glow transition-colors duration-500`}>
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <Shield className="w-4 h-4 text-emerald-400" />
           <h3 className="text-sm font-medium text-gray-300">Keeper Engine</h3>
+          {justUpdated && (
+            <span className="text-[9px] text-emerald-400 bg-emerald-400/10 rounded-full px-2 py-0.5 animate-pulse font-medium">
+              ⚡ Updated from chat
+            </span>
+          )}
         </div>
         {running && (
           <Loader2 className="w-3.5 h-3.5 text-emerald-400 animate-spin" />
@@ -1338,6 +2160,15 @@ function PositionsCard({
 }
 
 function HealthBadge({ value }: { value: number }) {
+  // Handle infinity or very large HF (no borrows)
+  if (!value || value > 1e10) {
+    return (
+      <span className="text-[10px] font-medium px-2 py-0.5 rounded-full text-emerald-400 bg-emerald-400/10">
+        HF: ∞ • Safe
+      </span>
+    );
+  }
+
   let color = "text-emerald-400 bg-emerald-400/10";
   let label = "Healthy";
 
@@ -1366,6 +2197,18 @@ function HealthBadge({ value }: { value: number }) {
 // ============================================
 
 function DecisionHistoryCard({ history }: { history: KeeperResult[] }) {
+  const [justUpdated, setJustUpdated] = useState(false);
+  const prevCountRef = useRef(0);
+
+  useEffect(() => {
+    if (history.length > prevCountRef.current && prevCountRef.current > 0) {
+      setJustUpdated(true);
+      const timer = setTimeout(() => setJustUpdated(false), 3000);
+      return () => clearTimeout(timer);
+    }
+    prevCountRef.current = history.length;
+  }, [history.length]);
+
   const actionIcons: Record<string, string> = {
     HOLD: "🟡",
     HARVEST: "🔴",
@@ -1376,10 +2219,15 @@ function DecisionHistoryCard({ history }: { history: KeeperResult[] }) {
   };
 
   return (
-    <div className="rounded-xl border border-gray-800/60 bg-gray-900/40 p-4 card-glow">
+    <div className={`rounded-xl border ${justUpdated ? "border-purple-500/40" : "border-gray-800/60"} bg-gray-900/40 p-4 card-glow transition-colors duration-500`}>
       <div className="flex items-center gap-2 mb-3">
         <FileText className="w-4 h-4 text-emerald-400" />
         <h3 className="text-sm font-medium text-gray-300">Decision Log</h3>
+        {justUpdated && (
+          <span className="text-[9px] text-purple-400 bg-purple-400/10 rounded-full px-2 py-0.5 animate-pulse font-medium">
+            + new entry
+          </span>
+        )}
         <span className="text-[10px] text-gray-500 ml-auto">
           {history.length} entries
         </span>
@@ -1409,7 +2257,7 @@ function DecisionHistoryCard({ history }: { history: KeeperResult[] }) {
               <p className="text-gray-500 truncate">{entry.decision.reason}</p>
               <span className="text-gray-600 text-[10px]">
                 {new Date(entry.timestamp).toLocaleTimeString()}
-                {entry.hcsLog.topicId && <> • HCS: {entry.hcsLog.topicId}</>}
+                {entry.hcsLog.topicId && <> • Audit: {entry.hcsLog.topicId}</>}
               </span>
             </div>
           </div>

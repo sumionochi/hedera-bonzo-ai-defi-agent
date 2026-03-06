@@ -3,14 +3,24 @@ import { getDecisionHistory, ensureAuditTopic } from "@/lib/hcs";
 
 export async function GET(req: NextRequest) {
   try {
-    const topicId = req.nextUrl.searchParams.get("topicId");
+    let topicId = req.nextUrl.searchParams.get("topicId");
     const limit = parseInt(req.nextUrl.searchParams.get("limit") || "20");
 
+    // Auto-detect topic ID from environment if not provided
     if (!topicId) {
-      return NextResponse.json(
-        { success: false, error: "topicId query parameter is required" },
-        { status: 400 }
-      );
+      topicId = process.env.HCS_AUDIT_TOPIC_ID || null;
+    }
+
+    if (!topicId) {
+      // Try to create/ensure a topic exists
+      try {
+        topicId = await ensureAuditTopic();
+      } catch {
+        return NextResponse.json({
+          success: true,
+          data: { topicId: null, messages: [], decisions: [], count: 0 },
+        });
+      }
     }
 
     const decisions = await getDecisionHistory(topicId, limit);
@@ -20,6 +30,7 @@ export async function GET(req: NextRequest) {
       data: {
         topicId,
         decisions,
+        messages: decisions, // Alias for inline component compatibility
         count: decisions.length,
       },
     });
