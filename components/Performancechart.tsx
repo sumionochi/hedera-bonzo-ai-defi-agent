@@ -85,7 +85,7 @@ function CustomTooltip({ active, payload, label }: any) {
   );
 }
 
-export default function PerformanceChart() {
+export default function Performancechart() {
   const [data, setData] = useState<BacktestResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);

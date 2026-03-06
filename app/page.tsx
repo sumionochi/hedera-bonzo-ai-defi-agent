@@ -27,8 +27,12 @@ import {
 } from "lucide-react";
 
 // Recharts uses browser APIs — dynamic import with ssr: false
-const PerformanceChart = dynamic(
+const Performancechart = dynamic(
   () => import("@/components/Performancechart"),
+  { ssr: false }
+);
+const HCSTimeline = dynamic(
+  () => import("@/components/HCSTimeline"),
   { ssr: false }
 );
 
@@ -148,6 +152,7 @@ export default function Home() {
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [activeTab, setActiveTab] = useState<"chat" | "chart" | "audit">("chat");
 
   // Fetch market data on load
   useEffect(() => {
@@ -172,6 +177,10 @@ export default function Home() {
       if (json.success) {
         setKeeperResult(json.data);
         setKeeperHistory((prev) => [json.data, ...prev].slice(0, 20));
+        // Propagate HCS topic ID
+        if (json.data.hcsLog?.topicId && typeof window !== "undefined") {
+          localStorage.setItem("vaultmind_hcs_topic", json.data.hcsLog.topicId);
+        }
       }
     } catch (err: any) {
       console.error("Auto-keeper error:", err);
@@ -253,6 +262,10 @@ export default function Home() {
         setKeeperHistory((prev) => [json.data, ...prev].slice(0, 20));
         if (execute && json.data.execution?.executed) {
           fetchPositions();
+        }
+        // Propagate HCS topic ID to localStorage for HCS Audit tab
+        if (json.data.hcsLog?.topicId && typeof window !== "undefined") {
+          localStorage.setItem("vaultmind_hcs_topic", json.data.hcsLog.topicId);
         }
       }
     } catch (err: any) {
@@ -430,13 +443,35 @@ export default function Home() {
             </div>
           </div>
 
-          {/* Right: Performance Chart + Chat Interface */}
-          <div className="lg:col-span-2 flex flex-col gap-4">
-            {/* Performance Chart */}
-            <PerformanceChart />
+          {/* Right: Tabbed Content */}
+          <div className="lg:col-span-2 flex flex-col gap-0">
+            {/* Tab Bar */}
+            <div className="flex items-center gap-1 bg-gray-900/60 rounded-t-xl border border-b-0 border-gray-800/60 px-2 pt-2">
+              {([
+                { id: "chat", label: "Chat", icon: "💬" },
+                { id: "chart", label: "Performance", icon: "📈" },
+                { id: "audit", label: "HCS Audit", icon: "🔗" },
+              ] as const).map((tab) => (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id)}
+                  className={`flex items-center gap-1.5 text-xs font-medium px-4 py-2 rounded-t-lg transition-colors ${
+                    activeTab === tab.id
+                      ? "bg-gray-800/80 text-emerald-400 border border-b-0 border-gray-700/50"
+                      : "text-gray-500 hover:text-gray-300"
+                  }`}
+                >
+                  <span className="text-sm">{tab.icon}</span>
+                  {tab.label}
+                </button>
+              ))}
+            </div>
 
-            {/* Chat Interface */}
-            <div className="flex flex-col rounded-xl border border-gray-800/60 bg-gray-900/20 overflow-hidden min-h-[450px] flex-1">
+            {/* Tab Content */}
+            <div className="rounded-b-xl rounded-tr-xl border border-gray-800/60 bg-gray-900/20 overflow-hidden flex-1">
+              {/* Chat Tab */}
+              {activeTab === "chat" && (
+                <div className="flex flex-col min-h-[550px] h-full">
             {/* Chat Header */}
             <div className="px-4 py-3 border-b border-gray-800/40 flex items-center gap-2">
               <Zap className="w-4 h-4 text-emerald-400" />
@@ -547,7 +582,23 @@ export default function Home() {
                 ))}
               </div>
             </div>
-          </div>
+              </div>
+              )}
+
+              {/* Chart Tab */}
+              {activeTab === "chart" && (
+                <div className="p-4">
+                  <Performancechart />
+                </div>
+              )}
+
+              {/* Audit Tab */}
+              {activeTab === "audit" && (
+                <div className="p-4">
+                  <HCSTimeline />
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </main>
