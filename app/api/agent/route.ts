@@ -3,6 +3,7 @@ import { chat, getToolNames, type MarketContext } from "@/lib/agent";
 import { analyzeSentiment } from "@/lib/sentiment";
 import { getBonzoMarkets } from "@/lib/bonzo";
 import { buildRAGContext } from "@/lib/rag";
+import { getVaultsWithLiveData, getVaultsSummary } from "@/lib/bonzo-vaults";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -53,7 +54,7 @@ async function gatherContext(): Promise<MarketContext> {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { message, threadId } = body;
+    const { message, threadId, connectedAccount } = body;
 
     if (!message || typeof message !== "string") {
       return NextResponse.json(
@@ -87,11 +88,26 @@ export async function POST(req: NextRequest) {
     // Gather live context in parallel with nothing (fast, cached)
     const context = await gatherContext();
 
+    // Inject the user's connected wallet so the agent analyzes the right account
+    // The operator (HEDERA_ACCOUNT_ID) is for signing transactions
+    // The connectedAccount is the user's actual wallet to analyze
+    const userAccountId = connectedAccount || process.env.HEDERA_ACCOUNT_ID;
+    const walletContext = `\n\n[USER WALLET]\nThe user's connected wallet is ${userAccountId}. When analyzing portfolio, positions, balances, or account data, ALWAYS use account ${userAccountId} — NOT the operator account. The operator account is only for signing transactions.`;
+
     // Inject RAG knowledge base context for DeFi strategy questions
     const ragContext = buildRAGContext(message);
 
-    // Enhance message with RAG if relevant knowledge found
-    const enrichedMessage = ragContext ? `${message}\n${ragContext}` : message;
+    // Inject Bonzo Vault data for vault-related queries
+    let vaultContext = "";
+    try {
+      const vaults = await getVaultsWithLiveData();
+      vaultContext = "\n\n[BONZO VAULT LIVE DATA]\n" + getVaultsSummary(vaults);
+    } catch {}
+
+    // Enhance message with wallet identity + RAG + vault context
+    const enrichedMessage = [message, walletContext, ragContext, vaultContext]
+      .filter(Boolean)
+      .join("\n");
 
     const result = await chat(enrichedMessage, threadId || "default", context);
 

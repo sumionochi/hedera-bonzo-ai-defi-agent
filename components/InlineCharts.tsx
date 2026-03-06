@@ -651,6 +651,102 @@ export function SentimentGauge({
 }
 
 // ════════════════════════════════════════════
+// 8. BONZO VAULT COMPARE CHART
+// Bar chart comparing vault APYs with risk levels
+// ════════════════════════════════════════════
+
+function VaultCompareChart() {
+  const [vaults, setVaults] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch("/api/vaults?action=list")
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.success) setVaults(d.data.vaults);
+      })
+      .catch(console.error)
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) return <div className="p-4 text-gray-400 text-sm">Loading vault data...</div>;
+
+  const riskColor: Record<string, string> = {
+    low: "#10b981",
+    medium: "#f59e0b",
+    high: "#ef4444",
+  };
+
+  const strategyLabel: Record<string, string> = {
+    "single-asset-dex": "CLM",
+    "dual-asset-dex": "Dual",
+    "leveraged-lst": "Leveraged",
+  };
+
+  const chartData = vaults.map((v: any) => ({
+    name: v.name.replace("Bonzo ", ""),
+    apy: v.apy || 0,
+    tvl: (v.tvl || 0) / 1e6,
+    risk: v.riskLevel || "medium",
+    strategy: strategyLabel[v.strategy] || v.strategy,
+    fill: riskColor[v.riskLevel] || "#6b7280",
+  }));
+
+  return (
+    <div className="bg-gray-900/50 border border-gray-700/50 rounded-xl p-4 my-3">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold text-gray-200">
+          Bonzo Vault Comparison
+        </h3>
+        <span className="text-xs text-gray-500">APY % by vault</span>
+      </div>
+      <ResponsiveContainer width="100%" height={220}>
+        <BarChart data={chartData} layout="vertical" margin={{ left: 100, right: 30 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+          <XAxis type="number" tick={{ fill: "#9ca3af", fontSize: 11 }} domain={[0, "auto"]} />
+          <YAxis
+            dataKey="name"
+            type="category"
+            tick={{ fill: "#d1d5db", fontSize: 10 }}
+            width={95}
+          />
+          <Tooltip
+            contentStyle={{
+              backgroundColor: "#1f2937",
+              border: "1px solid #374151",
+              borderRadius: "8px",
+              fontSize: "12px",
+            }}
+            formatter={(value: any, name: any) => {
+              if (name === "apy") return [`${Number(value).toFixed(1)}%`, "APY"];
+              if (name === "tvl") return [`$${Number(value).toFixed(2)}M`, "TVL"];
+              return [value, name];
+            }}
+          />
+          <Bar
+            dataKey="apy"
+            radius={[0, 6, 6, 0]}
+            label={{ position: "right", fill: "#9ca3af", fontSize: 11, formatter: (v: any) => `${Number(v).toFixed(1)}%` }}
+          >
+            {chartData.map((entry: any, i: number) => (
+              <Cell key={i} fill={entry.fill} fillOpacity={0.8} />
+            ))}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+      <div className="flex gap-4 mt-2 justify-center">
+        {Object.entries(riskColor).map(([risk, color]) => (
+          <div key={risk} className="flex items-center gap-1.5">
+            <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: color }} />
+            <span className="text-xs text-gray-400 capitalize">{risk} risk</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════
 // CHART WIDGET DISPATCHER
 // Detects chart type from agent message and renders
 // ════════════════════════════════════════════
@@ -662,72 +758,87 @@ export type ChartType =
   | "apycompare"
   | "heatmap"
   | "ohlcv"
-  | "sentiment";
+  | "sentiment"
+  | "vaultcompare";
 
 /**
  * Detect which chart(s) to render based on message content.
  * Returns array of chart type strings.
  */
+/**
+ * Detect which charts to show based on USER QUERY ONLY.
+ * Keywords are intentionally specific to avoid false positives.
+ * We do NOT scan agent responses — they mention "risk", "vault", "portfolio"
+ * in almost every answer, which causes unrelated charts to appear.
+ */
 export function detectCharts(message: string): ChartType[] {
   const lower = message.toLowerCase();
   const charts: ChartType[] = [];
 
+  // Portfolio pie chart — explicit portfolio/holdings requests
   if (
-    lower.includes("portfolio") ||
-    lower.includes("holdings") ||
-    lower.includes("breakdown") ||
+    lower.includes("my portfolio") ||
+    lower.includes("portfolio breakdown") ||
+    lower.includes("portfolio chart") ||
+    lower.includes("show portfolio") ||
     lower.includes("pie chart") ||
+    lower.includes("my holdings") ||
     lower.includes("what do i own") ||
-    lower.includes("my positions") ||
     lower.includes("what am i holding")
   ) {
     charts.push("portfolio");
   }
 
+  // Correlation matrix — explicit correlation requests
   if (
     lower.includes("correlation") ||
     lower.includes("correlated") ||
-    lower.includes("matrix") ||
+    lower.includes("correlation matrix") ||
     lower.includes("relationship between")
   ) {
     charts.push("correlation");
   }
 
+  // Risk/return scatter — must explicitly ask for risk+return analysis
   if (
-    lower.includes("risk") ||
-    lower.includes("return") ||
-    lower.includes("scatter") ||
-    lower.includes("sharpe") ||
-    lower.includes("volatility analysis") ||
+    lower.includes("risk vs return") ||
     lower.includes("risk/return") ||
-    lower.includes("risk and return")
+    lower.includes("risk and return") ||
+    lower.includes("scatter plot") ||
+    lower.includes("sharpe ratio") ||
+    lower.includes("volatility analysis")
   ) {
     charts.push("riskreturn");
   }
 
+  // APY comparison — explicit yield/APY comparison requests (Bonzo Lend vs SaucerSwap)
   if (
-    lower.includes("apy") ||
-    lower.includes("yield comparison") ||
+    lower.includes("compare apy") ||
+    lower.includes("compare apys") ||
+    lower.includes("compare yield") ||
     lower.includes("compare rates") ||
+    lower.includes("apy comparison") ||
+    lower.includes("yield comparison") ||
     lower.includes("best yield") ||
-    lower.includes("earning opportunity") ||
-    lower.includes("interest rates") ||
-    lower.includes("where should i earn")
+    lower.includes("where should i earn") ||
+    lower.includes("apys across")
   ) {
     charts.push("apycompare");
   }
 
+  // DeFi heat map — explicit heat map or DeFi landscape requests
   if (
     lower.includes("heat map") ||
     lower.includes("heatmap") ||
-    lower.includes("opportunities") ||
     lower.includes("defi landscape") ||
+    lower.includes("defi opportunities") ||
     lower.includes("what's available") ||
     lower.includes("where can i invest")
   ) {
     charts.push("heatmap");
   }
 
+  // OHLCV / price chart
   if (
     lower.includes("price chart") ||
     lower.includes("candlestick") ||
@@ -738,15 +849,32 @@ export function detectCharts(message: string): ChartType[] {
     charts.push("ohlcv");
   }
 
+  // Sentiment gauge — explicit sentiment or market mood
   if (
-    lower.includes("sentiment") ||
-    lower.includes("fear") ||
-    lower.includes("greed") ||
+    lower.includes("market sentiment") ||
+    lower.includes("fear and greed") ||
+    lower.includes("fear & greed") ||
     lower.includes("market mood") ||
     lower.includes("how's the market") ||
-    lower.includes("bullish or bearish")
+    lower.includes("how is the market") ||
+    lower.includes("bullish or bearish") ||
+    lower.includes("show sentiment") ||
+    lower.includes("check sentiment")
   ) {
     charts.push("sentiment");
+  }
+
+  // Vault comparison — explicit vault comparison requests
+  if (
+    lower.includes("vault comparison") ||
+    lower.includes("compare vault") ||
+    lower.includes("compare bonzo vault") ||
+    lower.includes("vault apy") ||
+    lower.includes("which vault") ||
+    lower.includes("vault strategy") ||
+    lower.includes("bonzo vault")
+  ) {
+    charts.push("vaultcompare");
   }
 
   return charts;
@@ -781,6 +909,8 @@ export function InlineChart({
           confidence={sentiment?.confidence || 50}
         />
       );
+    case "vaultcompare":
+      return <VaultCompareChart />;
     default:
       return null;
   }

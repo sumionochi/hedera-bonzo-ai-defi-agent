@@ -7,8 +7,9 @@ import {
   calculateCorrelation,
   calculateRiskReturn,
   getPoolsV1,
-  getOHLCV,
 } from "@/lib/saucerswap";
+import { getCachedOHLCV, getTechnicalIndicators } from "@/lib/ohlcv-cache";
+import { getVaultsWithLiveData, compareVaults } from "@/lib/bonzo-vaults";
 
 export const dynamic = "force-dynamic";
 
@@ -168,11 +169,16 @@ export async function GET(req: NextRequest) {
       }
 
       case "ohlcv": {
-        const poolId = parseInt(req.nextUrl.searchParams.get("poolId") || "1");
+        const poolId = parseInt(req.nextUrl.searchParams.get("poolId") || "2");
         const days = parseInt(req.nextUrl.searchParams.get("days") || "30");
-        const bars = await getOHLCV(poolId, "DAY", days);
+        // Use cached OHLCV data (auto-fetches if stale)
+        const bars = await getCachedOHLCV(poolId, "DAY", days);
+        const indicators = await getTechnicalIndicators(poolId);
 
-        return NextResponse.json({ success: true, data: bars });
+        return NextResponse.json({
+          success: true,
+          data: { bars, indicators, poolId, cached: true },
+        });
       }
 
       case "tokens": {
@@ -180,6 +186,27 @@ export async function GET(req: NextRequest) {
         return NextResponse.json({
           success: true,
           data: tokens.slice(0, 30),
+        });
+      }
+
+      case "vaultcompare": {
+        const vaults = await getVaultsWithLiveData();
+        const comparisons = compareVaults(vaults);
+        return NextResponse.json({
+          success: true,
+          data: {
+            vaults: vaults.map((v) => ({
+              id: v.id,
+              name: v.name,
+              strategy: v.strategy,
+              apy: v.apy,
+              tvl: v.tvl,
+              risk: v.riskLevel,
+              protocol: v.underlyingProtocol,
+            })),
+            comparisons,
+            totalTVL: vaults.reduce((s, v) => s + (v.tvl || 0), 0),
+          },
         });
       }
 

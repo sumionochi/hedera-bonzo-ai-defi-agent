@@ -141,6 +141,13 @@ interface KeeperDecision {
 
 interface KeeperResult {
   decision: KeeperDecision;
+  vaultDecision?: {
+    vaultId: string;
+    action: string;
+    reason: string;
+    confidence: number;
+    targetVaultId?: string;
+  } | null;
   sentiment: { score: number; signal: string; reasoning: string };
   portfolio: PortfolioData | null;
   execution: { executed: boolean; agentResponse?: string; error?: string };
@@ -168,11 +175,35 @@ export default function Home() {
     {
       id: "welcome",
       role: "assistant",
-      content:
-        "Welcome to VaultMind! I'm your AI DeFi keeper agent on Hedera. I monitor Bonzo Finance & SaucerSwap markets, analyze sentiment, and manage vault positions autonomously.\n\nTry asking me:\n• \"Show my portfolio breakdown\" — interactive pie chart\n• \"How's the market sentiment?\" — live gauge with Fear & Greed\n• \"Compare APYs across platforms\" — Bonzo vs SaucerSwap chart\n• \"Show correlation matrix\" — asset correlation heat map\n• \"Show risk vs return\" — scatter plot analysis\n• \"Show DeFi opportunities\" — heat map of yields",
+      content: `### 👋 Welcome to **VaultMind**
+  
+  I'm your **AI DeFi Keeper Agent on Hedera**.  
+  I continuously monitor **Bonzo Finance** and **SaucerSwap** markets, analyze sentiment, and manage vault positions autonomously.
+  
+  ---
+  
+  ### 🚀 Try asking me:
+  
+  - **“Show my portfolio breakdown”**  
+    _Interactive pie chart_
+  
+  - **“How’s the market sentiment?”**  
+    _Live Fear & Greed gauge_
+  
+  - **“Compare APYs across platforms”**  
+    _Bonzo vs SaucerSwap_
+  
+  - **“Show correlation matrix”**  
+    _Asset correlation heat map_
+  
+  - **“Show risk vs return”**  
+    _Scatter plot analysis_
+  
+  - **“Show DeFi opportunities”**  
+    _Yield heat map_`,
       timestamp: new Date(),
     },
-  ]);
+  ]);  
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [marketLoading, setMarketLoading] = useState(true);
@@ -210,12 +241,18 @@ export default function Home() {
   });
   const [priceAlerts, setPriceAlerts] = useState<PriceAlert[]>([]);
 
+  // Bonzo Vault state
+  const [vaultData, setVaultData] = useState<any>(null);
+  const [vaultLoading, setVaultLoading] = useState(true);
+
   // Fetch market data on load
   useEffect(() => {
     fetchMarketData();
     fetchPositions();
+    fetchVaultData();
     const interval = setInterval(fetchMarketData, 60_000);
-    return () => clearInterval(interval);
+    const vaultInterval = setInterval(fetchVaultData, 120_000);
+    return () => { clearInterval(interval); clearInterval(vaultInterval); };
   }, []);
 
   // Auto-scroll chat
@@ -294,9 +331,9 @@ export default function Home() {
     }
   }
 
-  async function fetchPositions() {
+  async function fetchPositions(overrideAccountId?: string) {
     try {
-      const acct = connectedAccount || "";
+      const acct = overrideAccountId || connectedAccount || "";
       const url = acct
         ? `/api/positions?accountId=${acct}`
         : "/api/positions";
@@ -309,6 +346,20 @@ export default function Home() {
       console.error("Failed to fetch positions:", err);
     } finally {
       setPositionsLoading(false);
+    }
+  }
+
+  async function fetchVaultData() {
+    try {
+      const res = await fetch("/api/vaults?action=list");
+      const json = await res.json();
+      if (json.success) {
+        setVaultData(json.data);
+      }
+    } catch (err: any) {
+      console.error("Failed to fetch vault data:", err);
+    } finally {
+      setVaultLoading(false);
     }
   }
 
@@ -399,17 +450,16 @@ export default function Home() {
         body: JSON.stringify({
           message: userMessage.content,
           threadId: "vaultmind-session",
+          connectedAccount: connectedAccount || undefined,
         }),
       });
 
       const json = await res.json();
 
-      // Detect charts from both user query and agent response
-      const chartsFromQuery = detectCharts(userMessage.content);
-      const chartsFromResponse = json.success
-        ? detectCharts(json.data.response)
-        : [];
-      const allCharts = Array.from(new Set([...chartsFromQuery, ...chartsFromResponse])) as ChartType[];
+      // Only detect charts from USER QUERY — not the agent response
+      // The agent response mentions "risk", "vault", "portfolio" in almost every
+      // answer, causing unrelated charts to appear
+      const detectedCharts = detectCharts(userMessage.content);
 
       const assistantMessage: ChatMessage = {
         id: (Date.now() + 1).toString(),
@@ -418,7 +468,7 @@ export default function Home() {
           ? json.data.response
           : `Error: ${json.error}`,
         toolCalls: json.data?.toolCalls,
-        charts: allCharts.length > 0 ? allCharts : undefined,
+        charts: detectedCharts.length > 0 ? detectedCharts : undefined,
         sentiment: json.data?.sentiment,
         timestamp: new Date(),
       };
@@ -501,7 +551,7 @@ export default function Home() {
               onConnect={(id, data) => {
                 setConnectedAccount(id);
                 setWalletData(data);
-                fetchPositions();
+                fetchPositions(id);
               }}
               onDisconnect={() => {
                 setConnectedAccount(null);
@@ -527,6 +577,9 @@ export default function Home() {
 
             {/* Sentiment Card */}
             <SentimentCard sentiment={sentiment} loading={marketLoading} />
+
+            {/* Bonzo Vaults */}
+            <VaultCard data={vaultData} loading={vaultLoading} />
 
             {/* Market Overview */}
             <MarketCard
@@ -621,8 +674,7 @@ export default function Home() {
             <div className="rounded-b-xl rounded-tr-xl border border-gray-800/60 bg-gray-900/20 overflow-hidden flex-1">
               {/* Chat Tab */}
               {activeTab === "chat" && (
-                <div className="flex flex-col min-h-[550px] h-full">
-            {/* Chat Header */}
+                <div className="flex flex-col h-[calc(100vh-140px)]">            {/* Chat Header */}
             <div className="px-4 py-3 border-b border-gray-800/40 flex items-center gap-2">
               <Zap className="w-4 h-4 text-emerald-400" />
               <span className="text-sm font-medium text-gray-300">
@@ -719,7 +771,7 @@ export default function Home() {
                 </button>
               </div>
               <div className="flex gap-2 mt-2 flex-wrap">
-                {getDynamicSuggestions(messages).map((q) => (
+                {getDynamicSuggestions(messages, portfolio, keeperResult, connectedAccount, sentiment).map((q) => (
                   <button
                     key={q}
                     onClick={() => setInput(q)}
@@ -814,80 +866,164 @@ export default function Home() {
 
 // ── Helpers ──
 
-/** Dynamic context-aware suggestions that change based on conversation */
-function getDynamicSuggestions(messages: ChatMessage[]): string[] {
-  const lastMsg = messages[messages.length - 1];
+/** Dynamic context-aware suggestions — analyzes actual chat content + app state */
+function getDynamicSuggestions(
+  messages: ChatMessage[],
+  portfolio?: PortfolioData | null,
+  keeperResult?: KeeperResult | null,
+  connectedAccount?: string | null,
+  sentiment?: SentimentData | null
+): string[] {
+  const lastAssistant = [...messages]
+    .reverse()
+    .find((m) => m.role === "assistant");
+  const lastUser = [...messages].reverse().find((m) => m.role === "user");
+  const lastContent = (lastAssistant?.content || "").toLowerCase();
+  const lastUserContent = (lastUser?.content || "").toLowerCase();
+  const lastCharts = lastAssistant?.charts || [];
   const msgCount = messages.length;
-  const lastContent = lastMsg?.content?.toLowerCase() || "";
 
-  // Phase-based suggestions — evolve as conversation progresses
-  const allSuggestions = [
-    // Getting started
-    [
-      "Show my portfolio breakdown",
+  const suggestions: string[] = [];
+
+  // ── If no wallet connected, always suggest connecting first ──
+  if (!connectedAccount && msgCount <= 2) {
+    return [
+      "Show me the best yields on Hedera",
       "How's the market sentiment?",
-      "What are the best yields right now?",
-    ],
-    // After first response — deeper analysis
-    [
-      "Show correlation matrix",
-      "Compare APYs across platforms",
-      "Show DeFi opportunities heat map",
-    ],
-    // Strategy phase
-    [
-      "Show risk vs return analysis",
-      "What's the best lending loop strategy?",
-      "Should I concentrate liquidity?",
-    ],
-    // Action phase
-    [
-      "Deposit 100 HBAR into Bonzo",
-      "Run keeper dry run",
-      "Show price chart for HBAR",
-    ],
-    // Monitoring phase
-    [
-      "Check my health factor",
-      "What's the market mood?",
-      "Where can I invest for higher yield?",
-    ],
-  ];
+      "What DeFi strategies work on Hedera?",
+    ];
+  }
 
-  // Pick suggestions based on conversation depth
-  const phase = Math.min(Math.floor(msgCount / 3), allSuggestions.length - 1);
-
-  // If last message mentioned specific topics, show related follow-ups
-  if (lastContent.includes("portfolio") || lastContent.includes("holdings")) {
-    return [
-      "Show correlation between my assets",
+  // ── React to what charts were just shown ──
+  if (lastCharts.includes("portfolio")) {
+    suggestions.push(
+      "Show correlation between these assets",
       "What's my risk/return profile?",
-      "Compare yields I could earn",
-    ];
+      "How can I optimize this allocation?"
+    );
   }
-  if (lastContent.includes("sentiment") || lastContent.includes("bearish") || lastContent.includes("bullish")) {
-    return [
-      "Show DeFi heat map",
-      "Should I harvest or hold?",
-      "What's the volatility right now?",
-    ];
+  if (lastCharts.includes("sentiment")) {
+    suggestions.push(
+      "Should I adjust my positions based on this?",
+      "Show the DeFi heat map",
+      "What would the keeper recommend?"
+    );
   }
-  if (lastContent.includes("apy") || lastContent.includes("yield") || lastContent.includes("rate")) {
-    return [
-      "Show heat map of opportunities",
-      "Explain the Bonzo lending loop",
-      "Deposit into the best yield",
-    ];
+  if (lastCharts.includes("apycompare")) {
+    suggestions.push(
+      "Deposit into the highest yield",
+      "Explain the risk differences",
+      "Show DeFi opportunities heat map"
+    );
   }
-  if (lastContent.includes("deposit") || lastContent.includes("withdraw")) {
-    return [
-      "Check my positions",
-      "What's my health factor?",
-      "Run keeper to optimize",
-    ];
+  if (lastCharts.includes("correlation")) {
+    suggestions.push(
+      "Which assets should I diversify into?",
+      "Show risk vs return scatter",
+      "How does impermanent loss affect my LP?"
+    );
+  }
+  if (lastCharts.includes("heatmap")) {
+    suggestions.push(
+      "What's the safest opportunity?",
+      "Compare the top 3 yields",
+      "Deposit into the best option"
+    );
+  }
+  if (lastCharts.includes("riskreturn")) {
+    suggestions.push(
+      "Which asset has the best Sharpe ratio?",
+      "How do I reduce my portfolio risk?",
+      "Set up a balanced portfolio"
+    );
+  }
+  if (lastCharts.includes("ohlcv")) {
+    suggestions.push(
+      "Set a price alert for HBAR",
+      "What's the support/resistance?",
+      "Show market sentiment"
+    );
+  }
+  if (suggestions.length > 0) return suggestions.slice(0, 3);
+
+  // ── React to assistant response topics ──
+  if (lastContent.includes("deposit") || lastContent.includes("supplied")) {
+    suggestions.push("Check my health factor", "Run keeper to monitor", "What are the risks?");
+  } else if (lastContent.includes("borrow") || lastContent.includes("loan")) {
+    suggestions.push("What's my liquidation price?", "Should I repay some debt?", "Show health factor");
+  } else if (lastContent.includes("swap") || lastContent.includes("exchange")) {
+    suggestions.push("Show price chart", "Best time to swap?", "Compare rates across DEXs");
+  } else if (lastContent.includes("yield") || lastContent.includes("apy") || lastContent.includes("earn")) {
+    suggestions.push("Compare all yields", "What's the lending loop strategy?", "Show heat map");
+  } else if (lastContent.includes("risk") || lastContent.includes("danger") || lastContent.includes("liquidat")) {
+    suggestions.push("How do I reduce risk?", "Set up price alerts", "Run keeper for safety check");
+  } else if (lastContent.includes("strategy") || lastContent.includes("recommend")) {
+    suggestions.push("Execute this strategy", "Show risk/return trade-off", "Compare alternatives");
+  } else if (lastContent.includes("keeper") || lastContent.includes("autonomous")) {
+    suggestions.push("Start auto-keeper loop", "Show decision history", "Adjust strategy thresholds");
+  } else if (lastContent.includes("staking") || lastContent.includes("infinity")) {
+    suggestions.push("How much can I earn staking?", "SAUCE vs HBARX staking?", "Show staking yields");
+  } else if (lastContent.includes("impermanent loss") || lastContent.includes("concentrated")) {
+    suggestions.push("Calculate my IL exposure", "When should I exit LP?", "Show correlation matrix");
+  } else if (lastContent.includes("vault") || lastContent.includes("beefy") || lastContent.includes("clm")) {
+    suggestions.push("Compare all Bonzo Vault APYs", "Which vault is best for me?", "Explain the leveraged HBARX vault");
+  } else if (lastContent.includes("harvest") || lastContent.includes("compound")) {
+    suggestions.push("Should I harvest now or wait?", "What's the optimal harvest timing?", "Show vault comparison");
+  } else if (lastContent.includes("leverag") || lastContent.includes("hbarx vault") || lastContent.includes("lst")) {
+    suggestions.push("Show leveraged LST vault risks", "What if HBAR borrow rate rises?", "Compare vault vs direct lending");
+  }
+  if (suggestions.length > 0) return suggestions.slice(0, 3);
+
+  // ── React to keeper state ──
+  if (keeperResult) {
+    const action = keeperResult.decision.action;
+    if (action === "HOLD") {
+      suggestions.push("Why is the keeper holding?", "Show market sentiment", "What would trigger action?");
+    } else if (action === "HARVEST" || action === "EXIT_TO_STABLE") {
+      suggestions.push("Execute the harvest now", "What's the market outlook?", "Show my positions");
+    } else if (action === "INCREASE_POSITION") {
+      suggestions.push("Execute the deposit", "What's the target allocation?", "Show risk analysis");
+    } else if (action === "REPAY_DEBT") {
+      suggestions.push("Execute repayment now", "Show health factor history", "How much to repay?");
+    }
+    if (suggestions.length > 0) return suggestions.slice(0, 3);
   }
 
-  return allSuggestions[phase];
+  // ── React to sentiment ──
+  if (sentiment) {
+    const score = sentiment.score;
+    if (score < -30) {
+      suggestions.push("Should I exit positions?", "What's driving bearish sentiment?", "Set up protective alerts");
+    } else if (score > 50) {
+      suggestions.push("Best yield opportunities now", "Should I increase positions?", "Show bullish strategies");
+    }
+    if (suggestions.length > 0) return suggestions.slice(0, 3);
+  }
+
+  // ── React to portfolio state ──
+  if (portfolio && portfolio.positions.length > 0) {
+    if (portfolio.healthFactor < 1.5) {
+      suggestions.push("How do I improve my health factor?", "Should I repay some debt?", "Run keeper safety check");
+    } else {
+      suggestions.push("Show my portfolio breakdown", "Compare yield opportunities", "Run keeper analysis");
+    }
+    return suggestions.slice(0, 3);
+  }
+
+  // ── Conversation depth phases ──
+  if (msgCount <= 2) {
+    return ["Show my portfolio breakdown", "Compare Bonzo Vault APYs", "How's the market sentiment?"];
+  }
+  if (msgCount <= 5) {
+    return ["Which vault is best for safe yield?", "Compare APYs across platforms", "Show DeFi heat map"];
+  }
+  if (msgCount <= 8) {
+    return ["Show vault vs lending comparison", "What's the leveraged HBARX strategy?", "Run keeper dry run"];
+  }
+  if (msgCount <= 12) {
+    return ["Deposit 100 HBAR into Bonzo", "Should I harvest vaults now?", "Start auto-keeper"];
+  }
+  return ["Compare vault harvest timing", "Where can I earn more?", "Show market sentiment"];
 }
 
 function formatCountdown(seconds: number): string {
@@ -1046,6 +1182,32 @@ function KeeperPanel({
               <span className="text-emerald-400 font-medium">Agent: </span>
               {result.execution.agentResponse.substring(0, 200)}
               {result.execution.agentResponse.length > 200 ? "..." : ""}
+            </div>
+          )}
+          {/* Vault Keeper Decision */}
+          {result.vaultDecision && (
+            <div className="mt-2 p-2.5 bg-purple-900/15 rounded-lg border border-purple-700/25">
+              <div className="flex items-center gap-1.5 mb-1">
+                <span className="text-xs">🏦</span>
+                <span className="text-[10px] font-medium text-purple-400">Vault Keeper</span>
+                <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${
+                  result.vaultDecision.action === "HOLD"
+                    ? "text-yellow-400 bg-yellow-400/10"
+                    : result.vaultDecision.action === "HARVEST"
+                    ? "text-orange-400 bg-orange-400/10"
+                    : result.vaultDecision.action === "DEPOSIT"
+                    ? "text-emerald-400 bg-emerald-400/10"
+                    : result.vaultDecision.action === "SWITCH_VAULT"
+                    ? "text-blue-400 bg-blue-400/10"
+                    : "text-gray-400 bg-gray-400/10"
+                }`}>
+                  {result.vaultDecision.action}
+                </span>
+              </div>
+              <p className="text-[10px] text-gray-400 leading-relaxed">
+                {result.vaultDecision.reason.substring(0, 150)}
+                {result.vaultDecision.reason.length > 150 ? "..." : ""}
+              </p>
             </div>
           )}
         </div>
@@ -1395,6 +1557,106 @@ function SentimentCard({
       <p className="text-[11px] text-gray-500 mt-2 leading-relaxed">
         {sentiment.reasoning}
       </p>
+    </div>
+  );
+}
+
+// ============================================
+// Bonzo Vaults Card Component
+// ============================================
+
+function VaultCard({
+  data,
+  loading,
+}: {
+  data: any;
+  loading: boolean;
+}) {
+  if (loading) {
+    return (
+      <div className="rounded-xl border border-gray-800/60 bg-gray-900/40 p-4 card-glow">
+        <div className="animate-pulse space-y-2">
+          <div className="h-4 bg-gray-700/50 rounded w-1/2" />
+          <div className="h-3 bg-gray-700/30 rounded w-full" />
+          <div className="h-3 bg-gray-700/30 rounded w-3/4" />
+        </div>
+      </div>
+    );
+  }
+
+  if (!data?.vaults) return null;
+
+  const vaults = data.vaults;
+  const totalTVL = data.totalTVL || 0;
+  const avgAPY = data.avgAPY || 0;
+
+  const riskColors: Record<string, string> = {
+    low: "text-green-400 bg-green-400/10",
+    medium: "text-yellow-400 bg-yellow-400/10",
+    high: "text-red-400 bg-red-400/10",
+  };
+
+  const strategyIcons: Record<string, string> = {
+    "single-asset-dex": "🎯",
+    "dual-asset-dex": "⚖️",
+    "leveraged-lst": "🔄",
+  };
+
+  return (
+    <div className="rounded-xl border border-purple-800/40 bg-gray-900/40 p-4 card-glow">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <span className="text-lg">🏦</span>
+          <h3 className="text-sm font-medium text-gray-300">Bonzo Vaults</h3>
+        </div>
+        <div className="text-right">
+          <div className="text-xs text-gray-500">Total TVL</div>
+          <div className="text-sm font-semibold text-purple-400">
+            ${(totalTVL / 1e6).toFixed(2)}M
+          </div>
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        {vaults.map((vault: any) => (
+          <div
+            key={vault.id}
+            className="flex items-center justify-between px-3 py-2 rounded-lg bg-gray-800/40 border border-gray-700/30 hover:border-purple-600/40 transition-colors"
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="text-sm flex-shrink-0">
+                {strategyIcons[vault.strategy] || "📦"}
+              </span>
+              <div className="min-w-0">
+                <div className="text-xs font-medium text-gray-200 truncate">
+                  {vault.name}
+                </div>
+                <div className="text-[10px] text-gray-500">
+                  {vault.underlyingProtocol}
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center gap-3 flex-shrink-0">
+              <span
+                className={`text-[10px] px-1.5 py-0.5 rounded ${riskColors[vault.riskLevel] || "text-gray-400"}`}
+              >
+                {vault.riskLevel}
+              </span>
+              <div className="text-right">
+                <div className="text-sm font-semibold text-emerald-400">
+                  {vault.apy?.toFixed(1)}%
+                </div>
+                <div className="text-[10px] text-gray-500">APY</div>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-3 pt-2 border-t border-gray-800/60 flex justify-between text-xs text-gray-500">
+        <span>Avg APY: {avgAPY.toFixed(1)}%</span>
+        <span>{vaults.length} active vaults</span>
+      </div>
     </div>
   );
 }

@@ -2,10 +2,11 @@
 // Bonzo Finance - Real API Integration
 // Docs: https://docs.bonzo.finance/hub/developer/bonzo-lend/lend-data-api
 //
-// data.bonzo.finance is temporarily returning 500.
+// NOTE: data.bonzo.finance is temporarily returning 500.
 // Per Bonzo docs, use mainnet-data-staging.bonzo.finance as fallback.
 // ============================================
 
+// Ordered by priority: staging first (currently working), then main
 const BONZO_API_URLS = [
   "https://mainnet-data-staging.bonzo.finance",
   "https://data.bonzo.finance",
@@ -78,6 +79,21 @@ export interface BonzoAccountDashboard {
   timestamp: string;
 }
 
+export interface BonzoStats {
+  totalSupplyValue: string;
+  totalBorrowedValue: string;
+  totalLiquidityValue: string;
+  totalDepositsCount: number;
+  totalWithdrawsCount: number;
+  totalBorrowsCount: number;
+  totalRepaysCount: number;
+  totalSuccessfulTransactions: number;
+  totalFailedTransactions: number;
+  activeUsers: string[];
+  timestampStart: string;
+  timestampEnd: string;
+}
+
 /**
  * Fetch from Bonzo API with automatic URL fallback
  */
@@ -88,29 +104,24 @@ async function bonzoFetch(path: string): Promise<any> {
     try {
       const url = `${baseUrl}${path}`;
       console.log(`[Bonzo] Trying: ${url}`);
-      const res = await fetch(url, {
-        cache: "no-store",
-        signal: AbortSignal.timeout(10000),
-      });
+      const res = await fetch(url, { cache: "no-store" });
 
       if (!res.ok) {
         console.warn(`[Bonzo] ${url} returned ${res.status}`);
-        lastError = new Error(`${baseUrl} returned ${res.status}`);
+        lastError = new Error(`Bonzo API ${res.status}: ${res.statusText}`);
         continue;
       }
 
       const data = await res.json();
-      console.log(`[Bonzo] Success from: ${baseUrl}`);
+      console.log(`[Bonzo] ✅ Success from: ${baseUrl}`);
       return data;
     } catch (err: any) {
-      console.warn(`[Bonzo] ${baseUrl} failed: ${err.message}`);
+      console.warn(`[Bonzo] ${baseUrl} failed:`, err.message);
       lastError = err;
     }
   }
 
-  throw new Error(
-    `All Bonzo API URLs failed. Last error: ${lastError?.message}`
-  );
+  throw lastError || new Error("All Bonzo API URLs failed");
 }
 
 /**
@@ -185,10 +196,7 @@ export async function getBonzoAccountDashboard(
     reserves: (data.reserves || []).map((r: any) => ({
       symbol: r.symbol,
       name: r.name,
-      tokenBalance: r.token_balance || {
-        token_display: "0",
-        usd_display: "0",
-      },
+      tokenBalance: r.token_balance || { token_display: "0", usd_display: "0" },
       atokenBalance: r.atoken_balance || {
         token_display: "0",
         usd_display: "0",
@@ -241,12 +249,19 @@ export async function getBonzoAccountDashboard(
 /**
  * GET /stats — 24-hour protocol statistics
  */
-export async function getBonzoStats() {
+export async function getBonzoStats(): Promise<BonzoStats> {
   const data = await bonzoFetch("/stats");
+
   return {
     totalSupplyValue: data.total_supply_value?.hbar_display || "0",
     totalBorrowedValue: data.total_borrowed_value?.hbar_display || "0",
+    totalLiquidityValue: data.total_liquidity_value?.hbar_display || "0",
+    totalDepositsCount: data.total_deposits_count || 0,
+    totalWithdrawsCount: data.total_withdraws_count || 0,
+    totalBorrowsCount: data.total_borrows_count || 0,
+    totalRepaysCount: data.total_repays_count || 0,
     totalSuccessfulTransactions: data.total_successful_transactions || 0,
+    totalFailedTransactions: data.total_failed_transactions || 0,
     activeUsers: data.active_users || [],
     timestampStart: data.timestamp_start || "",
     timestampEnd: data.timestamp_end || "",
@@ -254,7 +269,7 @@ export async function getBonzoStats() {
 }
 
 /**
- * GET /info — Protocol configuration
+ * GET /info — Protocol configuration (lending pool, oracle, etc.)
  */
 export async function getBonzoInfo() {
   return bonzoFetch("/info");

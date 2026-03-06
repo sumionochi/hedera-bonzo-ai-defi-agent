@@ -1,45 +1,86 @@
 import { NextRequest, NextResponse } from "next/server";
 import { runKeeperCycle, type StrategyConfig } from "@/lib/keeper";
+import {
+  getVaultsWithLiveData,
+  makeVaultDecision,
+  type VaultKeeperContext,
+} from "@/lib/bonzo-vaults";
+import { analyzeSentiment } from "@/lib/sentiment";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 60; // keeper cycle can take time
+export const maxDuration = 60;
 
 /**
  * GET /api/keeper — Run a keeper cycle (dry-run by default)
  * Query params:
  *   ?execute=true — Actually execute the decision (default: false)
+ *   ?mode=lend|vault|both — Which keeper to run (default: both)
  */
 export async function GET(req: NextRequest) {
   const execute = req.nextUrl.searchParams.get("execute") === "true";
+  const mode = req.nextUrl.searchParams.get("mode") || "both";
 
   try {
-    console.log(`[API/keeper] Running keeper cycle (execute: ${execute})...`);
-    const result = await runKeeperCycle(undefined, execute);
+    console.log(
+      `[API/keeper] Running keeper cycle (execute: ${execute}, mode: ${mode})...`
+    );
+
+    // Always run lend keeper
+    const lendResult =
+      mode !== "vault" ? await runKeeperCycle(undefined, execute) : null;
+
+    // Run vault keeper
+    let vaultDecision = null;
+    if (mode !== "lend") {
+      try {
+        const [vaults, sentiment] = await Promise.all([
+          getVaultsWithLiveData(),
+          analyzeSentiment(),
+        ]);
+        const ctx: VaultKeeperContext = {
+          vaults,
+          sentimentScore: sentiment.score,
+          volatility: sentiment.dataPoints.volatility,
+          hbarPrice: sentiment.dataPoints.hbarPrice,
+          fearGreedIndex: sentiment.dataPoints.fearGreedValue,
+          userHbarBalance: 1000,
+          userPositions: [],
+        };
+        vaultDecision = makeVaultDecision(ctx);
+      } catch (e: any) {
+        console.warn("[API/keeper] Vault decision error:", e.message);
+      }
+    }
 
     return NextResponse.json({
       success: true,
       data: {
-        decision: result.decision,
-        sentiment: {
-          score: result.sentiment.score,
-          signal: result.sentiment.signal,
-          confidence: result.sentiment.confidence,
-          reasoning: result.sentiment.reasoning,
-        },
-        portfolio: result.portfolio
+        // Lend keeper result
+        decision: lendResult?.decision || null,
+        sentiment: lendResult
           ? {
-              positions: result.portfolio.positions,
-              totalSuppliedUSD: result.portfolio.totalSuppliedUSD,
-              totalBorrowedUSD: result.portfolio.totalBorrowedUSD,
-              netWorthUSD: result.portfolio.netWorthUSD,
-              healthFactor: result.portfolio.healthFactor,
-              averageNetAPY: result.portfolio.averageNetAPY,
+              score: lendResult.sentiment.score,
+              signal: lendResult.sentiment.signal,
+              confidence: lendResult.sentiment.confidence,
+              reasoning: lendResult.sentiment.reasoning,
             }
           : null,
-        execution: result.execution,
-        hcsLog: result.hcsLog,
-        durationMs: result.durationMs,
-        timestamp: result.timestamp,
+        portfolio: lendResult?.portfolio
+          ? {
+              positions: lendResult.portfolio.positions,
+              totalSuppliedUSD: lendResult.portfolio.totalSuppliedUSD,
+              totalBorrowedUSD: lendResult.portfolio.totalBorrowedUSD,
+              netWorthUSD: lendResult.portfolio.netWorthUSD,
+              healthFactor: lendResult.portfolio.healthFactor,
+              averageNetAPY: lendResult.portfolio.averageNetAPY,
+            }
+          : null,
+        execution: lendResult?.execution || null,
+        hcsLog: lendResult?.hcsLog || null,
+        // Vault keeper result
+        vaultDecision,
+        durationMs: lendResult?.durationMs || 0,
+        timestamp: lendResult?.timestamp || new Date().toISOString(),
       },
     });
   } catch (error: any) {

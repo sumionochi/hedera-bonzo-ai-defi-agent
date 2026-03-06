@@ -620,3 +620,16 @@ export async function runKeeperCycle(
     durationMs,
   };
 }
+
+// ── Vault Keeper Extension ──────────────────────────────────
+// Re-export vault decision making from bonzo-vaults for unified keeper access
+
+export {
+  makeVaultDecision,
+  getVaultsWithLiveData,
+  compareVaults,
+  getVaultsSummary,
+  type VaultDecision,
+  type BonzoVault,
+  type VaultKeeperContext,
+} from "./bonzo-vaults";
