@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { chat, getToolNames, type MarketContext } from "@/lib/agent";
+import {
+  chat as chatLangChain,
+  getToolNames,
+  type MarketContext,
+} from "@/lib/agent";
+import { chatVercel, getVercelProviderInfo } from "@/lib/agent-vercel";
 import { analyzeSentiment } from "@/lib/sentiment";
 import { getBonzoMarkets } from "@/lib/bonzo";
 import { buildRAGContext } from "@/lib/rag";
@@ -8,9 +13,22 @@ import { getVaultsWithLiveData, getVaultsSummary } from "@/lib/bonzo-vaults";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
+// ── AI Provider selection ──
+// Set AI_PROVIDER=vercel or AI_PROVIDER=langchain in .env.local
+// Can also be overridden per-request via body.provider
+
+type AIProvider = "langchain" | "vercel";
+
+function getProvider(requestOverride?: string): AIProvider {
+  const override = requestOverride?.toLowerCase();
+  if (override === "vercel" || override === "langchain") return override;
+  const env = (process.env.AI_PROVIDER || "langchain").toLowerCase();
+  return env === "vercel" ? "vercel" : "langchain";
+}
+
 /**
  * Gather live market context to inject into agent conversations.
- * This makes the agent aware of current conditions without extra tool calls.
+ * Both providers use the same context format.
  */
 async function gatherContext(): Promise<MarketContext> {
   const ctx: MarketContext = {};
@@ -54,7 +72,13 @@ async function gatherContext(): Promise<MarketContext> {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { message, threadId, connectedAccount, strategyConfig } = body;
+    const {
+      message,
+      threadId,
+      connectedAccount,
+      strategyConfig,
+      provider: providerOverride,
+    } = body;
 
     if (!message || typeof message !== "string") {
       return NextResponse.json(
@@ -85,41 +109,41 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Gather live context in parallel with nothing (fast, cached)
+    // Select AI provider
+    const activeProvider = getProvider(providerOverride);
+    console.log(`[API/agent] Provider: ${activeProvider}`);
+
+    // Gather live context
     const context = await gatherContext();
 
-    // Inject the user's connected wallet so the agent analyzes the right account
+    // Inject wallet + RAG + vault + strategy context
     const userAccountId = connectedAccount || process.env.HEDERA_ACCOUNT_ID;
-    const walletContext = `\n\n[USER WALLET]\nThe user's connected wallet is ${userAccountId}. When analyzing portfolio, positions, balances, or account data, ALWAYS use account ${userAccountId} — NOT the operator account. The operator account is only for signing transactions.`;
+    const walletContext = `\n\n[USER WALLET]\nThe user's connected wallet is ${userAccountId}. When analyzing portfolio, positions, balances, or account data, ALWAYS use account ${userAccountId} — NOT the operator account.`;
 
-    // Inject RAG knowledge base context for DeFi strategy questions
     const ragContext = buildRAGContext(message);
 
-    // Inject Bonzo Vault data for vault-related queries
     let vaultContext = "";
     try {
       const vaults = await getVaultsWithLiveData();
       vaultContext = "\n\n[BONZO VAULT LIVE DATA]\n" + getVaultsSummary(vaults);
     } catch {}
 
-    // Inject active strategy configuration so agent references current policy
     let strategyContext = "";
     if (strategyConfig) {
       strategyContext =
-        `\n\n[ACTIVE STRATEGY CONFIG]\nThe user has configured these keeper parameters — reference them when explaining decisions:\n` +
-        `• Bearish threshold: ${strategyConfig.bearishThreshold} (harvest when sentiment below this)\n` +
-        `• Bullish threshold: ${strategyConfig.bullishThreshold} (accumulate when above this)\n` +
+        `\n\n[ACTIVE STRATEGY CONFIG]\nKeeper parameters:\n` +
+        `• Bearish threshold: ${strategyConfig.bearishThreshold}\n` +
+        `• Bullish threshold: ${strategyConfig.bullishThreshold}\n` +
         `• Confidence minimum: ${(
           strategyConfig.confidenceMinimum * 100
-        ).toFixed(0)}% (don't act below this)\n` +
-        `• HF danger: ${strategyConfig.healthFactorDanger} (emergency repay below this)\n` +
-        `• HF target: ${strategyConfig.healthFactorTarget} (safe zone target)\n` +
-        `• High volatility threshold: ${strategyConfig.highVolatilityThreshold}% (exit to stable above this)\n` +
-        `• Min yield differential: ${strategyConfig.minYieldDifferential}% (rebalance above this gap)\n` +
-        `When explaining keeper decisions, ALWAYS reference the user's active thresholds, e.g. "Using your bearish threshold of ${strategyConfig.bearishThreshold}, I decided to..."`;
+        ).toFixed(0)}%\n` +
+        `• HF danger: ${strategyConfig.healthFactorDanger}\n` +
+        `• HF target: ${strategyConfig.healthFactorTarget}\n` +
+        `• High volatility threshold: ${strategyConfig.highVolatilityThreshold}%\n` +
+        `• Min yield differential: ${strategyConfig.minYieldDifferential}%\n` +
+        `Reference these thresholds when explaining decisions.`;
     }
 
-    // Enhance message with wallet identity + RAG + vault + strategy context
     const enrichedMessage = [
       message,
       walletContext,
@@ -130,15 +154,37 @@ export async function POST(req: NextRequest) {
       .filter(Boolean)
       .join("\n");
 
-    const result = await chat(enrichedMessage, threadId || "default", context);
+    // ── Route to selected provider ──
+    let result;
+    if (activeProvider === "vercel") {
+      result = await chatVercel(
+        enrichedMessage,
+        threadId || "default",
+        context
+      );
+    } else {
+      result = await chatLangChain(
+        enrichedMessage,
+        threadId || "default",
+        context
+      );
+    }
 
     return NextResponse.json({
       success: true,
       data: {
         response: result.response,
+        action: result.action,
+        params: result.params,
+        suggestions: result.suggestions,
+        charts: result.charts,
         toolCalls: result.toolCalls,
         threadId: threadId || "default",
-        tools: getToolNames(),
+        provider: activeProvider,
+        tools:
+          activeProvider === "vercel"
+            ? getVercelProviderInfo().tools
+            : getToolNames(),
         sentiment: context.sentiment
           ? {
               score: context.sentiment.score,
@@ -151,24 +197,43 @@ export async function POST(req: NextRequest) {
   } catch (error: any) {
     console.error("[API/agent] Error:", error.message);
     return NextResponse.json(
-      {
-        success: false,
-        error: error.message || "Agent error",
-      },
+      { success: false, error: error.message || "Agent error" },
       { status: 500 }
     );
   }
 }
 
-// GET endpoint to check agent status and list tools
+// GET — shows status for active provider
 export async function GET() {
   try {
-    const tools = getToolNames();
+    const activeProvider = getProvider();
 
+    if (activeProvider === "vercel") {
+      const info = getVercelProviderInfo();
+      return NextResponse.json({
+        success: true,
+        data: {
+          status: "ready",
+          provider: "vercel-ai-sdk",
+          model: info.model,
+          sdkVersion: info.version,
+          toolCount: info.tools.length,
+          tools: info.tools,
+          features: info.features,
+          network: process.env.HEDERA_NETWORK || "testnet",
+          operator: process.env.HEDERA_ACCOUNT_ID || "not set",
+          hasOpenAI: !!process.env.OPENAI_API_KEY,
+        },
+      });
+    }
+
+    const tools = getToolNames();
     return NextResponse.json({
       success: true,
       data: {
         status: tools.length > 0 ? "ready" : "not_initialized",
+        provider: "langchain",
+        model: "gpt-4o",
         toolCount: tools.length,
         tools,
         network: process.env.HEDERA_NETWORK || "testnet",
@@ -178,10 +243,7 @@ export async function GET() {
     });
   } catch (error: any) {
     return NextResponse.json(
-      {
-        success: false,
-        error: error.message,
-      },
+      { success: false, error: error.message },
       { status: 500 }
     );
   }

@@ -2,7 +2,7 @@
   "name": "frontend",
   "version": "0.1.0",
   "private": true,
- "scripts": {
+  "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
@@ -12,11 +12,13 @@
     "postinstall": "cp node_modules/@bonzofinancelabs/hak-bonzo-plugin/bonzo-contracts.json ./bonzo-contracts.json 2>/dev/null || true"
   },
   "dependencies": {
+    "@ai-sdk/openai": "^3.0.36",
     "@bonzofinancelabs/hak-bonzo-plugin": "^1.0.1",
     "@hashgraph/sdk": "^2.80.0",
     "@langchain/core": "^1.1.24",
     "@langchain/langgraph": "^1.1.4",
     "@langchain/openai": "^1.2.7",
+    "ai": "^6.0.103",
     "dotenv": "^17.3.1",
     "hashconnect": "^3.0.14",
     "hedera-agent-kit": "^3.7.1",
