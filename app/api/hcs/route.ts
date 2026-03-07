@@ -4,7 +4,7 @@ import { getDecisionHistory, ensureAuditTopic } from "@/lib/hcs";
 export async function GET(req: NextRequest) {
   try {
     let topicId = req.nextUrl.searchParams.get("topicId");
-    const limit = parseInt(req.nextUrl.searchParams.get("limit") || "20");
+    const limit = parseInt(req.nextUrl.searchParams.get("limit") || "100");
 
     // Auto-detect topic ID from environment if not provided
     if (!topicId) {

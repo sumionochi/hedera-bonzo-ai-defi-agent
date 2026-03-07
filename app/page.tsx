@@ -179,7 +179,7 @@ export default function Home() {
       content:
         "Welcome to **VaultMind** — your AI DeFi Keeper on Hedera. Every feature is controllable from this chat.\n\n" +
         "**📊 Analytics**\n• \"Show my portfolio\" — pie chart\n• \"How's the market sentiment?\" — Fear & Greed\n• \"Compare APYs across platforms\" — Bonzo vs SaucerSwap\n• \"Show Bonzo Vault APYs\" — vault comparison\n• \"Show my positions\" — Bonzo Lend health factor\n• \"Show Bonzo markets\" — all reserves + rates\n• \"Show risk vs return\" / \"Show DeFi opportunities\" / \"Show correlation matrix\"\n\n" +
-        "**⚡ Keeper Engine**\n• \"Run dry run\" — analyze without executing\n• \"Execute keeper\" — confirm + execute\n• \"Start auto keeper\" / \"Stop auto keeper\"\n• \"Show decision history\" — past actions\n• \"Show audit log\" — HCS on-chain trail\n• \"Show last 5 HARVEST actions\" — filtered audit\n\n" +
+        "**⚡ Keeper Engine**\n• \"Run dry run\" — analyze without executing\n• \"Execute keeper\" — confirm + execute\n• \"Start auto keeper\" / \"Stop auto keeper\"\n• \"Show decision history\" — past actions\n• \"Show audit log\" — HCS on-chain trail\n• \"Show last 5 DEPOSIT actions\" — filtered audit\n• \"Show first 3 entries\" — oldest first\n• \"Show only BORROW actions\" — type filter\n\n" +
         "**⚙️ Strategy Config**\n• \"Show strategy config\" — current parameters\n• \"Set bearish threshold to -25\" — adjust risk\n• \"Set confidence minimum to 70\" — require higher confidence\n• \"Set volatility exit to 75\" — tighten exit\n• \"Reset strategy to defaults\"\n\n" +
         "**💰 Vault Actions**\n• \"Deposit 100 HBAR into HBAR-USDC vault\"\n• \"Withdraw from USDC-USDT vault\"\n• \"Harvest SAUCE-HBAR vault now\"\n• \"Switch vault to stable\"\n\n" +
         "**🏦 Lending Actions**\n• \"Supply 500 HBAR to Bonzo\"\n• \"Borrow 200 USDC\"\n• \"Repay my USDC loan\"\n\n" +
@@ -730,6 +730,42 @@ export default function Home() {
       return { action: "vault_switch", params: { target: "USDC-USDT Stable CLM" } };
     }
 
+    // ── HCS filter commands (BEFORE lending — "show REPAY entries" must not trigger lending_repay) ──
+    const auditContextWords = ["entries", "actions", "decisions", "audit", "hcs", "log", "trail", "on-chain", "keeper action", "keeper decision"];
+    const hasAuditContext = auditContextWords.some(w => lower.includes(w));
+
+    if (hasAuditContext) {
+      let hcsFilterAction: string | null = null;
+      const actionWords = ["harvest", "borrow", "repay", "deposit", "withdraw", "switch", "hold", "rebalance", "exit", "increase"];
+      for (const aw of actionWords) {
+        if (lower.includes(aw)) { hcsFilterAction = aw.toUpperCase(); break; }
+      }
+      const execMatch = lower.match(/execute[_\s](\w+)/);
+      if (execMatch) hcsFilterAction = execMatch[1].toUpperCase();
+
+      let hcsCount: number | null = null;
+      let hcsOrder: "asc" | "desc" = "desc";
+      const countMatch = lower.match(/(\d+)\s*(?:keeper\s+)?(?:actions?|decisions?|entries?|audits?|logs?)/);
+      if (countMatch) hcsCount = parseInt(countMatch[1]);
+      const lastNMatch = lower.match(/(?:last|recent|latest)\s+(\d+)/);
+      if (lastNMatch) { hcsCount = parseInt(lastNMatch[1]); hcsOrder = "desc"; }
+      const firstNMatch = lower.match(/(?:first|oldest|earliest)\s+(\d+)/);
+      if (firstNMatch) { hcsCount = parseInt(firstNMatch[1]); hcsOrder = "asc"; }
+      const anyNMatch = lower.match(/(?:any|show|display)\s+(\d+)/);
+      if (anyNMatch && !hcsCount) { hcsCount = parseInt(anyNMatch[1]); }
+
+      if (hcsFilterAction || hcsCount) {
+        return {
+          action: "hcs_filter",
+          params: {
+            ...(hcsFilterAction ? { filterAction: hcsFilterAction } : {}),
+            ...(hcsCount ? { count: hcsCount } : {}),
+            order: hcsOrder,
+          },
+        };
+      }
+    }
+
     // ── Lending Action Commands ──
     // "supply 500 HBAR to Bonzo" / "supply 200 USDC"
     const supplyMatch = lower.match(/supply\s+(\d+\.?\d*)\s*(\w+)/);
@@ -742,13 +778,6 @@ export default function Home() {
     if (repayMatch && (lower.includes("loan") || lower.includes("debt") || lower.includes("repay"))) {
       return { action: "lending_repay", params: { amount: repayMatch[1] ? parseFloat(repayMatch[1]) : "all", asset: repayMatch[2].toUpperCase() } };
     }
-
-    // ── HCS filter commands ──
-    // "show last 5 keeper actions" / "last 5 decisions" / "show 10 entries"
-    const hcsCountMatch = lower.match(/(?:show\s+)?(?:last\s+)?(\d+)\s+(?:keeper\s+)?(?:actions|decisions|entries)/);
-    if (hcsCountMatch) return { action: "hcs_filter", params: { count: parseInt(hcsCountMatch[1]) } };
-    const hcsActionMatch = lower.match(/show\s+(?:only\s+)?(\w+)\s+(?:actions|decisions)/);
-    if (hcsActionMatch) return { action: "hcs_filter", params: { filterAction: hcsActionMatch[1].toUpperCase() } };
 
     return null;
   }
@@ -1071,6 +1100,7 @@ export default function Home() {
             responseContent = "📈 Running **VaultMind vs HODL backtest** over the last 30 days. This simulates keeper decisions against real HBAR price data:";
           } else if (chart === "hcs") {
             if (!detectedCharts.includes("hcs")) detectedCharts.push("hcs");
+            actionData.hcs = { filterAction: null, filterCount: null, filterOrder: "desc" };
             responseContent = "📋 Here's your **HCS on-chain audit trail** — every keeper decision logged immutably on Hedera:";
           } else if (chart === "history") {
             if (!detectedCharts.includes("history")) detectedCharts.push("history");
@@ -1083,11 +1113,20 @@ export default function Home() {
         // ── HCS Filtered Query ──
         } else if (actionCmd.action === "hcs_filter") {
           const p = actionCmd.params || {};
-          actionData.hcs = { filterAction: p.filterAction, filterCount: p.count || 10 };
+          actionData.hcs = {
+            filterAction: p.filterAction || null,
+            filterCount: p.count || null,
+            filterOrder: p.order || "desc",
+          };
           if (!detectedCharts.includes("hcs")) detectedCharts.push("hcs");
-          responseContent = p.filterAction
-            ? `📋 Showing **${p.filterAction}** actions from the HCS audit trail:`
-            : `📋 Showing last **${p.count || 10}** audit trail entries:`;
+          // Build natural response
+          const parts: string[] = [];
+          if (p.order === "asc") parts.push("first");
+          else if (p.count) parts.push("last");
+          if (p.count) parts.push(`**${p.count}**`);
+          if (p.filterAction) parts.push(`**${p.filterAction}**`);
+          parts.push(p.count === 1 ? "entry" : "entries");
+          responseContent = `📋 Showing ${parts.join(" ")} from the HCS audit trail:`;
         }
 
         // Inject state data for display-only components
@@ -1635,7 +1674,7 @@ export default function Home() {
 
 // ── Helpers ──
 
-/** Dynamic context-aware suggestions — analyzes actual chat content + app state */
+/** Dynamic context-aware suggestions — analyzes actual chat content, action results + app state */
 function getDynamicSuggestions(
   messages: ChatMessage[],
   portfolio?: PortfolioData | null,
@@ -1646,15 +1685,11 @@ function getDynamicSuggestions(
   const lastAssistant = [...messages]
     .reverse()
     .find((m) => m.role === "assistant");
-  const lastUser = [...messages].reverse().find((m) => m.role === "user");
   const lastContent = (lastAssistant?.content || "").toLowerCase();
-  const lastUserContent = (lastUser?.content || "").toLowerCase();
   const lastCharts = lastAssistant?.charts || [];
   const msgCount = messages.length;
 
-  const suggestions: string[] = [];
-
-  // ── If no wallet connected, always suggest connecting first ──
+  // ── If no wallet connected, suggest connecting ──
   if (!connectedAccount && msgCount <= 2) {
     return [
       "Show me the best yields on Hedera",
@@ -1663,170 +1698,156 @@ function getDynamicSuggestions(
     ];
   }
 
-  // ── React to what charts were just shown ──
+  // ═══ SMART ACTION-RESULT SUGGESTIONS ═══
+  // Detect what just happened and suggest intelligent next steps
+
+  // After successful deposit/supply
+  if (lastContent.includes("deposited") && lastContent.includes("success")) {
+    return ["Borrow 5 USDC", "Show my positions", "Show audit log"];
+  }
+  if ((lastContent.includes("supplied") || lastContent.includes("deposit")) && lastCharts.includes("lendingaction")) {
+    const succeeded = lastContent.includes("✓") || lastContent.includes("success") || lastContent.includes("executed");
+    if (succeeded) return ["Borrow against my collateral", "Show my positions", "Check my health factor"];
+    return ["Try deposit 50 HBAR", "Show my wallet", "Show Bonzo markets"];
+  }
+
+  // After successful borrow
+  if (lastContent.includes("borrowed") && (lastContent.includes("success") || lastContent.includes("✓"))) {
+    return ["Repay my USDC loan", "Check my health factor", "Show my positions"];
+  }
+
+  // After successful repay
+  if (lastContent.includes("repaid") && (lastContent.includes("success") || lastContent.includes("✓"))) {
+    return ["Withdraw my collateral", "Show my positions", "Show audit log"];
+  }
+  // After failed repay
+  if (lastContent.includes("repay") && (lastContent.includes("failed") || lastContent.includes("reverted") || lastContent.includes("no outstanding"))) {
+    return ["Show my positions", "Deposit 100 HBAR", "Show audit log"];
+  }
+
+  // After successful withdraw
+  if (lastContent.includes("withdrew") && (lastContent.includes("success") || lastContent.includes("✓"))) {
+    return ["Deposit into higher yield", "Show Bonzo Vault APYs", "Show audit log"];
+  }
+
+  // After vault switch
+  if (lastContent.includes("switch") && lastCharts.includes("vaultaction")) {
+    const succeeded = lastContent.includes("✓") || lastContent.includes("success") || lastContent.includes("rebalanced");
+    if (succeeded) return ["Show my positions", "Show audit log", "Compare Bonzo Vault APYs"];
+    return ["Repay my loan first", "Show my positions", "Show audit log"];
+  }
+
+  // After harvest check
+  if (lastContent.includes("auto-compounding") || lastContent.includes("no harvest needed")) {
+    return ["Show my positions", "Deposit more HBAR", "Show audit log"];
+  }
+
+  // After HCS audit shown
+  if (lastCharts.includes("hcs")) {
+    return ["Show only DEPOSIT entries", "Show last 3 actions", "Show only BORROW entries"];
+  }
+
+  // After keeper run
+  if (lastCharts.includes("keeper")) {
+    return ["Execute keeper", "Show audit log", "Show decision history"];
+  }
+
+  // After chart displays
+  if (lastCharts.includes("positions")) {
+    const hasDebt = lastContent.includes("borrow") || lastContent.includes("debt");
+    if (hasDebt) return ["Repay my loan", "Check health factor", "Show audit log"];
+    return ["Deposit 100 HBAR", "Borrow 5 USDC", "Run dry run"];
+  }
   if (lastCharts.includes("portfolio")) {
-    suggestions.push(
-      "Show correlation between these assets",
-      "What's my risk/return profile?",
-      "How can I optimize this allocation?"
-    );
+    return ["Show risk/return scatter", "Run dry run", "Show correlation matrix"];
   }
   if (lastCharts.includes("sentiment")) {
-    suggestions.push(
-      "Should I adjust my positions based on this?",
-      "Show the DeFi heat map",
-      "What would the keeper recommend?"
-    );
+    return ["Run dry run", "Show DeFi heat map", "What should I do?"];
   }
   if (lastCharts.includes("apycompare")) {
-    suggestions.push(
-      "Deposit into the highest yield",
-      "Explain the risk differences",
-      "Show DeFi opportunities heat map"
-    );
-  }
-  if (lastCharts.includes("correlation")) {
-    suggestions.push(
-      "Which assets should I diversify into?",
-      "Show risk vs return scatter",
-      "How does impermanent loss affect my LP?"
-    );
-  }
-  if (lastCharts.includes("heatmap")) {
-    suggestions.push(
-      "What's the safest opportunity?",
-      "Compare the top 3 yields",
-      "Deposit into the best option"
-    );
-  }
-  if (lastCharts.includes("riskreturn")) {
-    suggestions.push(
-      "Which asset has the best Sharpe ratio?",
-      "How do I reduce my portfolio risk?",
-      "Set up a balanced portfolio"
-    );
-  }
-  if (lastCharts.includes("ohlcv")) {
-    suggestions.push(
-      "Set a price alert for HBAR",
-      "What's the support/resistance?",
-      "Show market sentiment"
-    );
-  }
-  // New Jarvis component reactions
-  if (lastCharts.includes("keeper")) {
-    suggestions.push("Execute keeper", "Show decision history", "Show audit log");
-  }
-  if (lastCharts.includes("positions")) {
-    suggestions.push("Run dry run", "Supply 100 HBAR to Bonzo", "Show strategy config");
-  }
-  if (lastCharts.includes("hcs")) {
-    suggestions.push("Show last 5 HARVEST actions", "Run dry run", "Show decision history");
-  }
-  if (lastCharts.includes("performance")) {
-    suggestions.push("Run dry run", "Show strategy config", "Compare Bonzo Vault APYs");
+    return ["Deposit into highest yield", "Show DeFi heat map", "Explain the risks"];
   }
   if (lastCharts.includes("market")) {
-    suggestions.push("Supply 500 HBAR to Bonzo", "Compare APYs across platforms", "Show DeFi opportunities");
+    return ["Deposit 100 HBAR", "Compare Bonzo Vault APYs", "Show DeFi heat map"];
   }
   if (lastCharts.includes("walletinfo")) {
-    suggestions.push("Show my positions", "Show my portfolio breakdown", "Run dry run");
+    return ["Show my positions", "Deposit 100 HBAR", "Run dry run"];
   }
   if (lastCharts.includes("strategyconfig")) {
-    suggestions.push("Run dry run", "Set bearish threshold to -25", "Reset strategy to defaults");
+    return ["Run dry run", "Set bearish threshold to -25", "Reset strategy"];
+  }
+  if (lastCharts.includes("performance")) {
+    return ["Run dry run", "Show strategy config", "Compare Bonzo Vault APYs"];
+  }
+  if (lastCharts.includes("ohlcv")) {
+    return ["Show market sentiment", "Run dry run", "What's the trend?"];
+  }
+  if (lastCharts.includes("heatmap")) {
+    return ["Deposit into best opportunity", "Compare APYs", "Show risk/return scatter"];
+  }
+  if (lastCharts.includes("correlation") || lastCharts.includes("riskreturn")) {
+    return ["Show my portfolio", "Run dry run", "Compare Bonzo Vault APYs"];
   }
   if (lastCharts.includes("vaultaction")) {
-    suggestions.push("Show Bonzo Vault APYs", "Show my positions", "Show audit log");
+    return ["Show my positions", "Show audit log", "Compare Bonzo Vault APYs"];
   }
   if (lastCharts.includes("lendingaction")) {
-    suggestions.push("Show my positions", "Show Bonzo markets", "Run dry run");
+    return ["Show my positions", "Show audit log", "Run dry run"];
   }
   if (lastCharts.includes("confirm")) {
-    suggestions.push("Run dry run", "Show strategy config", "Show audit log");
+    return ["Show audit log", "Show my positions", "Run dry run"];
   }
   if (lastCharts.includes("inlineerror")) {
-    suggestions.push("Connect wallet 0.0.5907362", "Run dry run", "Show my wallet");
+    return ["Connect wallet 0.0.5907362", "Show my wallet", "Run dry run"];
   }
-  if (suggestions.length > 0) return suggestions.slice(0, 3);
 
-  // ── React to assistant response topics ──
-  if (lastContent.includes("deposit") || lastContent.includes("supplied")) {
-    suggestions.push("Check my health factor", "Run keeper to monitor", "What are the risks?");
-  } else if (lastContent.includes("borrow") || lastContent.includes("loan")) {
-    suggestions.push("What's my liquidation price?", "Should I repay some debt?", "Show health factor");
-  } else if (lastContent.includes("swap") || lastContent.includes("exchange")) {
-    suggestions.push("Show price chart", "Best time to swap?", "Compare rates across DEXs");
-  } else if (lastContent.includes("yield") || lastContent.includes("apy") || lastContent.includes("earn")) {
-    suggestions.push("Compare all yields", "What's the lending loop strategy?", "Show heat map");
-  } else if (lastContent.includes("risk") || lastContent.includes("danger") || lastContent.includes("liquidat")) {
-    suggestions.push("How do I reduce risk?", "Set up price alerts", "Run keeper for safety check");
-  } else if (lastContent.includes("strategy") || lastContent.includes("recommend")) {
-    suggestions.push("Execute this strategy", "Show risk/return trade-off", "Compare alternatives");
-  } else if (lastContent.includes("keeper") || lastContent.includes("autonomous")) {
-    suggestions.push("Start auto-keeper loop", "Show decision history", "Adjust strategy thresholds");
-  } else if (lastContent.includes("staking") || lastContent.includes("infinity")) {
-    suggestions.push("How much can I earn staking?", "SAUCE vs HBARX staking?", "Show staking yields");
-  } else if (lastContent.includes("impermanent loss") || lastContent.includes("concentrated")) {
-    suggestions.push("Calculate my IL exposure", "When should I exit LP?", "Show correlation matrix");
-  } else if (lastContent.includes("vault") || lastContent.includes("beefy") || lastContent.includes("clm")) {
-    suggestions.push("Compare all Bonzo Vault APYs", "Which vault is best for me?", "Explain the leveraged HBARX vault");
-  } else if (lastContent.includes("harvest") || lastContent.includes("compound")) {
-    suggestions.push("Should I harvest now or wait?", "What's the optimal harvest timing?", "Show vault comparison");
-  } else if (lastContent.includes("leverag") || lastContent.includes("hbarx vault") || lastContent.includes("lst")) {
-    suggestions.push("Show leveraged LST vault risks", "What if HBAR borrow rate rises?", "Compare vault vs direct lending");
+  // ═══ CONTENT-BASED FALLBACKS ═══
+  if (lastContent.includes("deposit") || lastContent.includes("supply")) {
+    return ["Check my health factor", "Borrow against collateral", "Show audit log"];
   }
-  if (suggestions.length > 0) return suggestions.slice(0, 3);
+  if (lastContent.includes("borrow") || lastContent.includes("loan")) {
+    return ["Repay my loan", "Check health factor", "Show my positions"];
+  }
+  if (lastContent.includes("yield") || lastContent.includes("apy")) {
+    return ["Deposit into highest yield", "Compare all yields", "Show heat map"];
+  }
+  if (lastContent.includes("risk") || lastContent.includes("liquidat")) {
+    return ["How do I reduce risk?", "Run keeper safety check", "Show health factor"];
+  }
+  if (lastContent.includes("keeper") || lastContent.includes("autonomous")) {
+    return ["Start auto-keeper", "Show decision history", "Show audit log"];
+  }
+  if (lastContent.includes("vault") || lastContent.includes("clm")) {
+    return ["Compare Bonzo Vault APYs", "Switch vault to stable", "Show my positions"];
+  }
+  if (lastContent.includes("staking")) {
+    return ["SAUCE vs HBARX staking?", "Show staking yields", "Compare all APYs"];
+  }
 
-  // ── React to keeper state ──
+  // ═══ KEEPER & PORTFOLIO STATE ═══
   if (keeperResult) {
     const action = keeperResult.decision.action;
-    if (action === "HOLD") {
-      suggestions.push("Why is the keeper holding?", "Show market sentiment", "What would trigger action?");
-    } else if (action === "HARVEST" || action === "EXIT_TO_STABLE") {
-      suggestions.push("Execute the harvest now", "What's the market outlook?", "Show my positions");
-    } else if (action === "INCREASE_POSITION") {
-      suggestions.push("Execute the deposit", "What's the target allocation?", "Show risk analysis");
-    } else if (action === "REPAY_DEBT") {
-      suggestions.push("Execute repayment now", "Show health factor history", "How much to repay?");
-    }
-    if (suggestions.length > 0) return suggestions.slice(0, 3);
+    if (action === "HOLD") return ["Why is keeper holding?", "Show market sentiment", "What would trigger action?"];
+    if (action === "HARVEST" || action === "EXIT_TO_STABLE") return ["Execute keeper", "Show market outlook", "Show my positions"];
+    if (action === "INCREASE_POSITION") return ["Execute the deposit", "Show risk analysis", "Show allocation"];
+    if (action === "REPAY_DEBT") return ["Execute repayment", "Show health factor", "How much to repay?"];
   }
 
-  // ── React to sentiment ──
   if (sentiment) {
-    const score = sentiment.score;
-    if (score < -30) {
-      suggestions.push("Should I exit positions?", "What's driving bearish sentiment?", "Set up protective alerts");
-    } else if (score > 50) {
-      suggestions.push("Best yield opportunities now", "Should I increase positions?", "Show bullish strategies");
-    }
-    if (suggestions.length > 0) return suggestions.slice(0, 3);
+    if (sentiment.score < -30) return ["Should I exit positions?", "Run keeper safety check", "Show protective strategies"];
+    if (sentiment.score > 50) return ["Best yield opportunities now", "Should I increase positions?", "Deposit 100 HBAR"];
   }
 
-  // ── React to portfolio state ──
   if (portfolio && portfolio.positions.length > 0) {
-    if (portfolio.healthFactor < 1.5) {
-      suggestions.push("How do I improve my health factor?", "Should I repay some debt?", "Run keeper safety check");
-    } else {
-      suggestions.push("Show my portfolio breakdown", "Compare yield opportunities", "Run keeper analysis");
-    }
-    return suggestions.slice(0, 3);
+    if (portfolio.healthFactor < 1.5) return ["Repay some debt", "Show health factor", "Run keeper safety check"];
+    return ["Show my portfolio", "Compare yields", "Run keeper analysis"];
   }
 
-  // ── Conversation depth phases ──
-  if (msgCount <= 2) {
-    return ["Run dry run", "Show my portfolio breakdown", "How's the market sentiment?"];
-  }
-  if (msgCount <= 5) {
-    return ["Show strategy config", "Compare Bonzo Vault APYs", "Show backtest"];
-  }
-  if (msgCount <= 8) {
-    return ["Execute keeper", "Deposit 100 HBAR into HBAR-USDC vault", "Show audit log"];
-  }
-  if (msgCount <= 12) {
-    return ["Start auto keeper", "Set bearish threshold to -25", "Supply 500 HBAR to Bonzo"];
-  }
-  return ["Run dry run", "Show last 5 HARVEST actions", "Compare APYs across platforms"];
+  // ═══ CONVERSATION DEPTH ═══
+  if (msgCount <= 2) return ["Run dry run", "Show my portfolio", "How's the market sentiment?"];
+  if (msgCount <= 5) return ["Deposit 100 HBAR", "Show strategy config", "Compare Bonzo Vault APYs"];
+  if (msgCount <= 8) return ["Execute keeper", "Show audit log", "Show backtest"];
+  return ["Run dry run", "Show audit log", "Compare yields"];
 }
 
 function formatCountdown(seconds: number): string {

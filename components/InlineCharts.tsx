@@ -1257,47 +1257,115 @@ function PositionsInline({ data }: { data?: any }) {
 // HCS Audit Timeline Inline Component
 // ============================================
 
+function parseHCSEntry(entry: any): { action: string; reason: string; seqNum: number; ts: string } {
+  let action = entry.action || "";
+  let reason = entry.reason || "";
+  if (!action) {
+    try {
+      const raw = entry.message || "";
+      const parsed = JSON.parse(raw.startsWith("{") ? raw : atob(raw));
+      action = parsed.action || "LOGGED";
+      reason = parsed.reason || "";
+    } catch { action = "LOGGED"; }
+  }
+  return {
+    action,
+    reason,
+    seqNum: entry.sequenceNumber || entry.sequence_number || 0,
+    ts: entry.consensusTimestamp || entry.consensus_timestamp || "",
+  };
+}
+
+function actionMatchesFilter(action: string, filter: string): boolean {
+  const a = action.toUpperCase();
+  const f = filter.toUpperCase();
+  // Exact match
+  if (a === f) return true;
+  // Partial match: "HARVEST" matches "EXECUTE_VAULT_HARVEST"
+  if (a.includes(f)) return true;
+  // Also match without EXECUTE_ prefix: "VAULT_SWITCH" matches "EXECUTE_VAULT_SWITCH"
+  if (a.replace("EXECUTE_", "").includes(f)) return true;
+  // Match just the last segment: "HARVEST" matches "EXECUTE_VAULT_HARVEST"
+  const segments = a.split("_");
+  if (segments.includes(f)) return true;
+  return false;
+}
+
+function getActionColor(action: string): string {
+  const a = action.toUpperCase();
+  if (a.includes("HOLD")) return "text-yellow-400 bg-yellow-400/10";
+  if (a.includes("HARVEST")) return "text-orange-400 bg-orange-400/10";
+  if (a.includes("DEPOSIT") || a.includes("INCREASE")) return "text-emerald-400 bg-emerald-400/10";
+  if (a.includes("WITHDRAW") || a.includes("EXIT")) return "text-red-400 bg-red-400/10";
+  if (a.includes("BORROW")) return "text-blue-400 bg-blue-400/10";
+  if (a.includes("REPAY")) return "text-purple-400 bg-purple-400/10";
+  if (a.includes("SWITCH") || a.includes("REBALANCE")) return "text-cyan-400 bg-cyan-400/10";
+  if (a.includes("FAIL")) return "text-red-400 bg-red-400/10";
+  return "text-emerald-400 bg-emerald-400/10";
+}
+
 function HCSInline({ data }: { data?: any }) {
-  const [entries, setEntries] = useState<any[]>([]);
+  const [allEntries, setAllEntries] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [topicId, setTopicId] = useState<string | null>(null);
 
-  const filterAction = data?.filterAction; // e.g. "HARVEST"
-  const filterCount = data?.filterCount || 10;
+  const filterAction = data?.filterAction || null; // e.g. "HARVEST", "BORROW"
+  const filterCount = data?.filterCount || null;   // e.g. 5, 10 — null means show all
+  const filterOrder = data?.filterOrder || "desc";  // "asc" for first N, "desc" for last N
 
   useEffect(() => {
-    // Get topicId from localStorage (set by keeper runs)
     const storedTopic = typeof window !== "undefined"
       ? localStorage.getItem("vaultmind_hcs_topic")
       : null;
 
+    // Always fetch max entries — we filter client-side
     const url = storedTopic
-      ? `/api/hcs?topicId=${storedTopic}&limit=${Math.min(filterCount * 3, 50)}`
-      : `/api/hcs?limit=${Math.min(filterCount * 3, 50)}`;
+      ? `/api/hcs?topicId=${storedTopic}&limit=100`
+      : `/api/hcs?limit=100`;
 
     fetch(url).then(r => r.json()).then(j => {
       if (j.success) {
-        let msgs = j.data?.messages || j.data?.decisions || [];
-        // Apply action filter if specified
-        if (filterAction) {
-          msgs = msgs.filter((m: any) => {
-            // Entries may be already-parsed objects or raw messages
-            if (m.action) return m.action.toUpperCase() === filterAction;
-            try {
-              const parsed = typeof m.message === "string"
-                ? (m.message.startsWith("{") ? JSON.parse(m.message) : JSON.parse(atob(m.message)))
-                : m;
-              return (parsed.action || "").toUpperCase() === filterAction;
-            } catch { return false; }
-          });
-        }
-        setEntries(msgs.slice(0, filterCount));
+        const msgs = j.data?.messages || j.data?.decisions || [];
+        setAllEntries(msgs);
         setTopicId(j.data?.topicId || storedTopic || null);
       }
     }).finally(() => setLoading(false));
-  }, [filterAction, filterCount]);
+  }, []);
 
   if (loading) return <ChartLoader label="Fetching HCS audit log..." />;
+
+  // Apply filters
+  let displayEntries = [...allEntries];
+
+  // Filter by action type (partial match)
+  if (filterAction) {
+    displayEntries = displayEntries.filter((entry) => {
+      const { action } = parseHCSEntry(entry);
+      return actionMatchesFilter(action, filterAction);
+    });
+  }
+
+  // Apply ordering: entries from API are desc (newest first)
+  if (filterOrder === "asc") {
+    displayEntries = displayEntries.reverse();
+  }
+
+  // Apply count limit
+  if (filterCount && filterCount > 0) {
+    displayEntries = displayEntries.slice(0, filterCount);
+  }
+
+  // Build description
+  let filterDesc = "";
+  if (filterAction && filterCount) {
+    filterDesc = `Showing ${filterOrder === "asc" ? "first" : "last"} ${filterCount} ${filterAction} entries`;
+  } else if (filterAction) {
+    filterDesc = `Filtered: ${filterAction} actions (${displayEntries.length} found)`;
+  } else if (filterCount) {
+    filterDesc = `Showing ${filterOrder === "asc" ? "first" : "last"} ${filterCount} of ${allEntries.length} entries`;
+  } else {
+    filterDesc = `${displayEntries.length} entries on-chain`;
+  }
 
   return (
     <div className="rounded-xl border border-cyan-800/40 bg-gray-900/60 p-4 space-y-3">
@@ -1306,48 +1374,38 @@ function HCSInline({ data }: { data?: any }) {
         {topicId && <span className="text-[10px] text-gray-500 ml-auto">Audit Topic: {topicId}</span>}
       </div>
 
-      {entries.length === 0 ? (
-        <p className="text-xs text-gray-500 text-center py-3">No audit entries yet. Run the keeper to create entries.</p>
+      {displayEntries.length === 0 ? (
+        <p className="text-xs text-gray-500 text-center py-3">
+          {filterAction
+            ? `No ${filterAction} actions found in ${allEntries.length} audit entries.`
+            : "No audit entries yet. Run the keeper to create entries."}
+        </p>
       ) : (
-        <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1">
-          {entries.slice(0, 8).map((entry: any, i: number) => {
-            // Entries may be parsed AgentDecisionLog objects OR raw Mirror Node messages
-            const action = entry.action || (() => {
-              try {
-                const parsed = JSON.parse(typeof entry.message === "string" && entry.message.startsWith("{")
-                  ? entry.message
-                  : atob(entry.message || ""));
-                return parsed.action;
-              } catch { return "LOGGED"; }
-            })();
-            const reason = entry.reason || (() => {
-              try {
-                const parsed = JSON.parse(typeof entry.message === "string" && entry.message.startsWith("{")
-                  ? entry.message
-                  : atob(entry.message || ""));
-                return parsed.reason;
-              } catch { return ""; }
-            })();
-            const seqNum = entry.sequenceNumber || entry.sequence_number;
-            const ts = entry.consensusTimestamp || entry.consensus_timestamp;
-
-            return (
-              <div key={i} className="p-2.5 rounded-lg bg-gray-800/40 border border-gray-700/30">
-                <div className="flex items-center justify-between mb-1">
-                  <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${
-                    action === "HOLD" ? "text-yellow-400 bg-yellow-400/10" :
-                    action === "HARVEST" ? "text-orange-400 bg-orange-400/10" :
-                    "text-emerald-400 bg-emerald-400/10"
-                  }`}>{action}</span>
-                  <span className="text-[9px] text-gray-600">
-                    seq #{seqNum} {ts ? `• ${new Date(Number(String(ts).split(".")[0]) * 1000).toLocaleTimeString()}` : ""}
-                  </span>
+        <>
+          <p className="text-[10px] text-gray-500">{filterDesc}</p>
+          <div className="space-y-2 max-h-[400px] overflow-y-auto pr-1">
+            {displayEntries.map((entry: any, i: number) => {
+              const { action, reason, seqNum, ts } = parseHCSEntry(entry);
+              return (
+                <div key={`${seqNum}-${i}`} className="p-2.5 rounded-lg bg-gray-800/40 border border-gray-700/30">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${getActionColor(action)}`}>
+                      {action}
+                    </span>
+                    <span className="text-[9px] text-gray-600">
+                      seq #{seqNum}{ts ? ` • ${new Date(Number(String(ts).split(".")[0]) * 1000).toLocaleTimeString()}` : ""}
+                    </span>
+                  </div>
+                  {reason && (
+                    <p className="text-[10px] text-gray-400 leading-relaxed">
+                      {reason.substring(0, 150)}{reason.length > 150 ? "..." : ""}
+                    </p>
+                  )}
                 </div>
-                {reason && <p className="text-[10px] text-gray-400 leading-relaxed">{reason.substring(0, 120)}{reason.length > 120 ? "..." : ""}</p>}
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        </>
       )}
       {topicId && (
         <div className="text-[10px] text-center">
