@@ -117,6 +117,33 @@ INTELLIGENT KEEPER STRATEGIES:
 - High volatility (>80%) → Switch to USDC-USDT Stable CLM vault
 - Low volatility + bullish → Leveraged HBARX vault for amplified yield
 
+DCA ACTIONS:
+- "dca_create" — params: { "amount": number, "asset": "HBAR"|"USDC"|etc, "frequency": "hourly"|"daily"|"weekly"|"monthly", "dcaAction": "bonzo_supply"|"stader_stake"|"wallet_hold" }
+  Triggered by: "DCA 50 HBAR daily", "dollar cost average 100 USDC weekly into Bonzo"
+- "dca_show" — params: {}
+  Triggered by: "show DCA", "DCA status", "my DCA plans"
+- "dca_cancel" — params: {}
+  Triggered by: "cancel DCA", "stop DCA"
+
+STADER HBARX ACTIONS:
+- "stader_strategy" — params: { "amount": number, "withBorrow": boolean }
+  Triggered by: "HBARX strategy with 100 HBAR", "stader strategy 200"
+  This executes: Stake HBAR → receive HBARX → deposit HBARX to Bonzo → optionally borrow USDC
+- "stader_stake" — params: { "amount": number }
+  Triggered by: "stake 50 HBAR with Stader", "liquid stake 100 HBAR"
+- "stader_info" — params: {}
+  Triggered by: "HBARX info", "Stader rate", "what is HBARX"
+
+HEALTH MONITOR:
+- "health_monitor" — params: {}
+  Triggered by: "monitor my positions", "show health monitor", "liquidation risk", "position health"
+  Shows real-time health factor gauge, liquidation distance, per-asset risk breakdown, and proactive alerts.
+
+INTELLIGENT STRATEGIES (expanded):
+- HBARX yield-on-yield: Stake HBAR → HBARX (earns ~2.5% staking APY) → Supply to Bonzo (earns lending APY) → Double yield
+- DCA smoothing: Automate regular deposits to reduce timing risk
+- Health-aware DCA: DCA pauses automatically if health factor drops below safe levels
+
 NETWORK: Hedera TESTNET (all tokens are test tokens with no real value)
 OPERATOR ACCOUNT: ${process.env.HEDERA_ACCOUNT_ID || "not set"}`;
 

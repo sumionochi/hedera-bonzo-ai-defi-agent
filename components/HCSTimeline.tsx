@@ -32,6 +32,10 @@ interface HCSDecision {
   params?: Record<string, unknown>;
   consensusTimestamp?: string;
   sequenceNumber?: number;
+  // DCA event fields
+  _isDCA?: boolean;
+  _dcaEvent?: string;
+  _dcaData?: Record<string, any>;
 }
 
 const ACTION_STYLES: Record<
@@ -74,21 +78,98 @@ const ACTION_STYLES: Record<
     border: "border-emerald-400/30",
     icon: "🟢",
   },
+  // DCA action styles
+  DCA_CREATE: {
+    color: "text-purple-400",
+    bg: "bg-purple-400/10",
+    border: "border-purple-400/30",
+    icon: "📅",
+  },
+  DCA_CANCEL: {
+    color: "text-red-400",
+    bg: "bg-red-400/10",
+    border: "border-red-400/30",
+    icon: "🚫",
+  },
+  DCA_PAUSE: {
+    color: "text-yellow-400",
+    bg: "bg-yellow-400/10",
+    border: "border-yellow-400/30",
+    icon: "⏸️",
+  },
+  DCA_RESUME: {
+    color: "text-green-400",
+    bg: "bg-green-400/10",
+    border: "border-green-400/30",
+    icon: "▶️",
+  },
+  DCA_EXECUTE: {
+    color: "text-blue-400",
+    bg: "bg-blue-400/10",
+    border: "border-blue-400/30",
+    icon: "🔄",
+  },
+  DCA_COMPLETE: {
+    color: "text-emerald-400",
+    bg: "bg-emerald-400/10",
+    border: "border-emerald-400/30",
+    icon: "✅",
+  },
+  // Execute action styles (from tx execution logging)
+  EXECUTE_VAULT_DEPOSIT: {
+    color: "text-emerald-400",
+    bg: "bg-emerald-400/10",
+    border: "border-emerald-400/30",
+    icon: "💰",
+  },
+  EXECUTE_VAULT_HARVEST: {
+    color: "text-yellow-400",
+    bg: "bg-yellow-400/10",
+    border: "border-yellow-400/30",
+    icon: "🌾",
+  },
+  EXECUTE_VAULT_SWITCH: {
+    color: "text-blue-400",
+    bg: "bg-blue-400/10",
+    border: "border-blue-400/30",
+    icon: "🔄",
+  },
+  EXECUTE_SUPPLY: {
+    color: "text-emerald-400",
+    bg: "bg-emerald-400/10",
+    border: "border-emerald-400/30",
+    icon: "📥",
+  },
+  EXECUTE_BORROW: {
+    color: "text-orange-400",
+    bg: "bg-orange-400/10",
+    border: "border-orange-400/30",
+    icon: "💳",
+  },
+  EXECUTE_REPAY: {
+    color: "text-green-400",
+    bg: "bg-green-400/10",
+    border: "border-green-400/30",
+    icon: "💸",
+  },
 };
 
 function getActionStyle(action: string) {
-  return (
-    ACTION_STYLES[action] || {
-      color: "text-gray-400",
-      bg: "bg-gray-400/10",
-      border: "border-gray-400/30",
-      icon: "⚪",
-    }
-  );
+  // Direct match first
+  if (ACTION_STYLES[action]) return ACTION_STYLES[action];
+  // Partial match for EXECUTE_ prefix
+  for (const key of Object.keys(ACTION_STYLES)) {
+    if (action.includes(key) || key.includes(action)) return ACTION_STYLES[key];
+  }
+  return {
+    color: "text-gray-400",
+    bg: "bg-gray-400/10",
+    border: "border-gray-400/30",
+    icon: "⚪",
+  };
 }
 
 function formatConsensusTimestamp(ts: string): string {
-  // Hedera consensus timestamps are "seconds.nanoseconds"
   try {
     const seconds = parseFloat(ts.split(".")[0]);
     return new Date(seconds * 1000).toLocaleString();
@@ -97,15 +178,96 @@ function formatConsensusTimestamp(ts: string): string {
   }
 }
 
-// Expandable decision entry
+/**
+ * Parse raw HCS JSON into an HCSDecision, handling both keeper and DCA events.
+ */
+function parseHCSMessage(raw: any, consensusTimestamp?: string, sequenceNumber?: number): HCSDecision | null {
+  if (!raw) return null;
+
+  // ── DCA Events ──
+  if (raw.type === "DCA_EVENT") {
+    const eventName = raw.event || "DCA";
+    const d = raw.data || {};
+    let reason = "";
+
+    if (eventName === "DCA_CREATE") {
+      reason = `Created DCA plan: ${d.amount ?? "?"} ${d.asset ?? "?"} ${d.frequency ?? "?"} → ${d.action === "bonzo_supply" ? "Bonzo Supply" : d.action || "supply"}`;
+    } else if (eventName === "DCA_EXECUTE") {
+      reason = `Executed DCA: ${d.amount ?? "?"} ${d.asset ?? "?"} — ${d.execStatus || "?"}${d.txId ? ` (tx: ${String(d.txId).substring(0, 30)}...)` : ""}`;
+    } else if (eventName === "DCA_CANCEL") {
+      reason = `Cancelled DCA plan`;
+    } else if (eventName === "DCA_PAUSE") {
+      reason = `Paused DCA plan`;
+    } else if (eventName === "DCA_RESUME") {
+      reason = `Resumed DCA plan`;
+    } else if (eventName === "DCA_COMPLETE") {
+      reason = `DCA plan completed: ${d.reason || "budget/execution limit reached"}`;
+    } else {
+      reason = `DCA event: ${eventName}`;
+    }
+
+    return {
+      timestamp: raw.timestamp || "",
+      agent: raw.agent || "vaultmind",
+      version: raw.version || "1.0",
+      action: eventName,
+      reason,
+      confidence: -1, // Special marker: no confidence for DCA events
+      context: {},
+      params: d,
+      consensusTimestamp,
+      sequenceNumber,
+      _isDCA: true,
+      _dcaEvent: eventName,
+      _dcaData: d,
+    };
+  }
+
+  // ── Standard Keeper / Execution Events ──
+  const action = raw.action || raw.decision?.action || "UNKNOWN";
+  const confidence = raw.confidence ?? raw.decision?.confidence ?? -1;
+  const reason = raw.reason || raw.decision?.reason || raw.details || "";
+
+  return {
+    timestamp: raw.timestamp || "",
+    agent: raw.agent || "VaultMind",
+    version: raw.version || "1.0",
+    action,
+    reason,
+    confidence: typeof confidence === "number" ? confidence : -1,
+    context: raw.context || raw.sentiment || {},
+    params: raw.params || raw.execution || undefined,
+    consensusTimestamp,
+    sequenceNumber,
+  };
+}
+
+// ── Expandable Decision Entry ──
 function DecisionEntry({ decision }: { decision: HCSDecision }) {
   const [expanded, setExpanded] = useState(false);
   const style = getActionStyle(decision.action);
-  const network = "testnet"; // Could be made dynamic
+  const network = "testnet";
 
   const mirrorNodeUrl = decision.consensusTimestamp
     ? `https://hashscan.io/${network}/transaction/${decision.consensusTimestamp}`
     : null;
+
+  // Display confidence only for non-DCA events with valid values
+  const showConfidence =
+    !decision._isDCA &&
+    decision.confidence >= 0 &&
+    !isNaN(decision.confidence);
+
+  const confidenceDisplay = showConfidence
+    ? decision.confidence > 1
+      ? decision.confidence.toFixed(0)
+      : (decision.confidence * 100).toFixed(0)
+    : null;
+
+  // Clean action label
+  const displayAction = decision._isDCA
+    ? decision.action.replace("DCA_", "DCA ")
+    : decision.action.replace("EXECUTE_", "");
 
   return (
     <div
@@ -126,12 +288,15 @@ function DecisionEntry({ decision }: { decision: HCSDecision }) {
           className="w-full text-left group"
         >
           <div className="flex items-center gap-2 mb-1">
+            <span className="text-xs">{style.icon}</span>
             <span className={`text-xs font-semibold ${style.color}`}>
-              {decision.action}
+              {displayAction}
             </span>
-            <span className="text-[10px] text-gray-600">
-              {(decision.confidence * 100).toFixed(0)}% confidence
-            </span>
+            {confidenceDisplay && (
+              <span className="text-[10px] text-gray-600">
+                {confidenceDisplay}% confidence
+              </span>
+            )}
             {decision.sequenceNumber && (
               <span className="text-[10px] text-gray-700 flex items-center gap-0.5">
                 <Hash className="w-2.5 h-2.5" />
@@ -171,58 +336,80 @@ function DecisionEntry({ decision }: { decision: HCSDecision }) {
         </div>
 
         {/* Expanded context */}
-        {expanded && decision.context && (
+        {expanded && (
           <div className="mt-2 p-2.5 bg-gray-800/40 rounded-lg border border-gray-700/30 text-[11px] space-y-1">
-            <p className="text-gray-500 font-medium text-[10px] uppercase tracking-wider mb-1.5">
-              Market Context at Decision Time
-            </p>
-            {decision.context.hbarPrice !== undefined && (
-              <div className="flex justify-between">
-                <span className="text-gray-500">HBAR Price</span>
-                <span className="text-gray-300">
-                  ${decision.context.hbarPrice.toFixed(4)}
-                  {decision.context.hbarChange24h !== undefined && (
-                    <span
-                      className={
-                        decision.context.hbarChange24h >= 0
-                          ? "text-emerald-400"
-                          : "text-red-400"
-                      }
-                    >
-                      {" "}
-                      ({decision.context.hbarChange24h >= 0 ? "+" : ""}
-                      {decision.context.hbarChange24h.toFixed(2)}%)
+            {/* Keeper market context */}
+            {!decision._isDCA && decision.context && Object.keys(decision.context).length > 0 && (
+              <>
+                <p className="text-gray-500 font-medium text-[10px] uppercase tracking-wider mb-1.5">
+                  Market Context at Decision Time
+                </p>
+                {decision.context.hbarPrice !== undefined && (
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">HBAR Price</span>
+                    <span className="text-gray-300">
+                      ${decision.context.hbarPrice.toFixed(4)}
+                      {decision.context.hbarChange24h !== undefined && (
+                        <span
+                          className={
+                            decision.context.hbarChange24h >= 0
+                              ? "text-emerald-400"
+                              : "text-red-400"
+                          }
+                        >
+                          {" "}
+                          ({decision.context.hbarChange24h >= 0 ? "+" : ""}
+                          {decision.context.hbarChange24h.toFixed(2)}%)
+                        </span>
+                      )}
                     </span>
-                  )}
-                </span>
-              </div>
+                  </div>
+                )}
+                {decision.context.sentimentScore !== undefined && (
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Sentiment</span>
+                    <span className="text-gray-300">
+                      {decision.context.sentimentScore} (
+                      {decision.context.sentimentSignal})
+                    </span>
+                  </div>
+                )}
+                {decision.context.fearGreedIndex !== undefined && (
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Fear & Greed</span>
+                    <span className="text-gray-300">
+                      {decision.context.fearGreedIndex}
+                    </span>
+                  </div>
+                )}
+                {decision.context.volatility !== undefined && (
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Volatility</span>
+                    <span className="text-gray-300">
+                      {decision.context.volatility.toFixed(0)}%
+                    </span>
+                  </div>
+                )}
+              </>
             )}
-            {decision.context.sentimentScore !== undefined && (
-              <div className="flex justify-between">
-                <span className="text-gray-500">Sentiment</span>
-                <span className="text-gray-300">
-                  {decision.context.sentimentScore} (
-                  {decision.context.sentimentSignal})
-                </span>
-              </div>
+
+            {/* DCA event details */}
+            {decision._isDCA && decision._dcaData && (
+              <>
+                <p className="text-gray-500 font-medium text-[10px] uppercase tracking-wider mb-1.5">
+                  DCA Event Details
+                </p>
+                {Object.entries(decision._dcaData).map(([k, v]) => (
+                  <div key={k} className="flex justify-between">
+                    <span className="text-gray-500">{k}</span>
+                    <span className="text-gray-300 truncate ml-4 max-w-[200px]">{String(v)}</span>
+                  </div>
+                ))}
+              </>
             )}
-            {decision.context.fearGreedIndex !== undefined && (
-              <div className="flex justify-between">
-                <span className="text-gray-500">Fear & Greed</span>
-                <span className="text-gray-300">
-                  {decision.context.fearGreedIndex}
-                </span>
-              </div>
-            )}
-            {decision.context.volatility !== undefined && (
-              <div className="flex justify-between">
-                <span className="text-gray-500">Volatility</span>
-                <span className="text-gray-300">
-                  {decision.context.volatility.toFixed(0)}%
-                </span>
-              </div>
-            )}
-            {decision.params && Object.keys(decision.params).length > 0 && (
+
+            {/* Keeper action params */}
+            {!decision._isDCA && decision.params && Object.keys(decision.params).length > 0 && (
               <>
                 <p className="text-gray-500 font-medium text-[10px] uppercase tracking-wider mt-2 mb-1">
                   Action Parameters
@@ -242,7 +429,7 @@ function DecisionEntry({ decision }: { decision: HCSDecision }) {
   );
 }
 
-// Main component
+// ── Main Component ──
 export default function HCSTimeline({ refreshTrigger }: { refreshTrigger?: number }) {
   const [topicId, setTopicId] = useState<string | null>(null);
   const [decisions, setDecisions] = useState<HCSDecision[]>([]);
@@ -250,7 +437,6 @@ export default function HCSTimeline({ refreshTrigger }: { refreshTrigger?: numbe
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Try to load topic from env (passed via keeper results) — refetch on refreshTrigger change
   useEffect(() => {
     const stored = typeof window !== "undefined"
       ? localStorage.getItem("vaultmind_hcs_topic")
@@ -259,11 +445,10 @@ export default function HCSTimeline({ refreshTrigger }: { refreshTrigger?: numbe
       setTopicId(stored);
       fetchDecisions(stored);
     } else {
-      // Try the API which can auto-detect from env
       fetch("/api/hcs?limit=50").then(r => r.json()).then(j => {
         if (j.success && j.data?.topicId) {
           setTopicId(j.data.topicId);
-          setDecisions(j.data.decisions || []);
+          parseAndSetDecisions(j.data.decisions || [], j.data.rawMessages);
           if (typeof window !== "undefined") {
             localStorage.setItem("vaultmind_hcs_topic", j.data.topicId);
           }
@@ -271,6 +456,44 @@ export default function HCSTimeline({ refreshTrigger }: { refreshTrigger?: numbe
       }).catch(() => {});
     }
   }, [refreshTrigger]);
+
+  /**
+   * Parse decisions from API. Handles both pre-parsed and raw Mirror Node messages.
+   */
+  function parseAndSetDecisions(decisions: any[], rawMessages?: any[]) {
+    // If we have raw Mirror Node messages, parse them ourselves for DCA support
+    if (rawMessages && rawMessages.length > 0) {
+      const parsed: HCSDecision[] = [];
+      for (const msg of rawMessages) {
+        try {
+          const text = typeof msg.message === "string"
+            ? (msg.message.startsWith("{") ? msg.message : atob(msg.message))
+            : "";
+          const json = JSON.parse(text);
+          const decision = parseHCSMessage(
+            json,
+            msg.consensus_timestamp,
+            msg.sequence_number
+          );
+          if (decision) parsed.push(decision);
+        } catch {
+          // Skip unparseable
+        }
+      }
+      setDecisions(parsed);
+      return;
+    }
+
+    // Fallback: use pre-parsed decisions from API but guard against NaN
+    const safe = decisions.map((d: any) => ({
+      ...d,
+      confidence: typeof d.confidence === "number" && !isNaN(d.confidence) ? d.confidence : -1,
+      action: d.action || "UNKNOWN",
+      reason: d.reason || "",
+      context: d.context || {},
+    }));
+    setDecisions(safe);
+  }
 
   async function createTopic() {
     setCreating(true);
@@ -301,30 +524,39 @@ export default function HCSTimeline({ refreshTrigger }: { refreshTrigger?: numbe
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/hcs?topicId=${tid}&limit=50`);
-      const json = await res.json();
-      if (json.success) {
-        setDecisions(json.data.decisions || []);
+      // Fetch directly from Mirror Node for full DCA event support
+      const mirrorRes = await fetch(
+        `https://testnet.mirrornode.hedera.com/api/v1/topics/${tid}/messages?limit=100&order=desc`
+      );
+      if (mirrorRes.ok) {
+        const mirrorData = await mirrorRes.json();
+        const messages = mirrorData.messages || [];
+        const parsed: HCSDecision[] = [];
+        for (const msg of messages) {
+          try {
+            const text = atob(msg.message);
+            const json = JSON.parse(text);
+            const decision = parseHCSMessage(json, msg.consensus_timestamp, msg.sequence_number);
+            if (decision) parsed.push(decision);
+          } catch {
+            // Skip
+          }
+        }
+        setDecisions(parsed);
       } else {
-        setError(json.error);
+        // Fallback to our API
+        const res = await fetch(`/api/hcs?topicId=${tid}&limit=50`);
+        const json = await res.json();
+        if (json.success) {
+          parseAndSetDecisions(json.data.decisions || [], json.data.rawMessages);
+        } else {
+          setError(json.error);
+        }
       }
     } catch (err: any) {
       setError(err.message);
     } finally {
       setLoading(false);
-    }
-  }
-
-  function handleSetTopic(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    const form = new FormData(e.currentTarget);
-    const tid = (form.get("topicId") as string)?.trim();
-    if (tid) {
-      setTopicId(tid);
-      if (typeof window !== "undefined") {
-        localStorage.setItem("vaultmind_hcs_topic", tid);
-      }
-      fetchDecisions(tid);
     }
   }
 
@@ -428,7 +660,7 @@ export default function HCSTimeline({ refreshTrigger }: { refreshTrigger?: numbe
           </a>
         </div>
         <p className="text-[10px] text-gray-600 pl-5">
-          This is the HCS topic where keeper decisions are logged immutably on Hedera. Each entry is verifiable on HashScan.
+          Keeper decisions + DCA events logged immutably on Hedera. Each entry is verifiable on HashScan.
         </p>
       </div>
 
@@ -461,7 +693,7 @@ export default function HCSTimeline({ refreshTrigger }: { refreshTrigger?: numbe
       {decisions.length > 0 && (
         <div className="space-y-0 max-h-[500px] overflow-y-auto pr-1">
           {decisions.map((d, i) => (
-            <DecisionEntry key={i} decision={d} />
+            <DecisionEntry key={`${d.sequenceNumber || i}`} decision={d} />
           ))}
         </div>
       )}
@@ -469,7 +701,14 @@ export default function HCSTimeline({ refreshTrigger }: { refreshTrigger?: numbe
       {/* Summary */}
       {decisions.length > 0 && (
         <div className="mt-4 pt-3 border-t border-gray-800/40 flex items-center justify-between text-[10px] text-gray-600">
-          <span>{decisions.length} decisions on-chain</span>
+          <span>
+            {decisions.length} events on-chain
+            {decisions.some(d => d._isDCA) && (
+              <span className="ml-1">
+                ({decisions.filter(d => d._isDCA).length} DCA, {decisions.filter(d => !d._isDCA).length} keeper)
+              </span>
+            )}
+          </span>
           <span>Immutable • Timestamped • Verifiable</span>
         </div>
       )}

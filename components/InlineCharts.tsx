@@ -20,7 +20,21 @@ import {
   Line,
 } from "recharts";
 import { Loader2 } from "lucide-react";
-
+import {
+  Calendar,
+  TrendingUp,
+  Shield,
+  AlertTriangle,
+  CheckCircle,
+  Play,
+  Pause,
+  Trash2,
+  ChevronDown,
+  ChevronUp,
+  Activity,
+  Droplets,
+  Zap,
+} from "lucide-react";
 // ── Color Palette ──
 const COLORS = [
   "#10b981", "#3b82f6", "#8b5cf6", "#f59e0b",
@@ -33,6 +47,593 @@ function ChartLoader({ label }: { label: string }) {
     <div className="flex items-center gap-2 py-4 justify-center">
       <Loader2 className="w-4 h-4 text-emerald-400 animate-spin" />
       <span className="text-xs text-gray-500">Loading {label}...</span>
+    </div>
+  );
+}
+
+// ────────────────────────────────────────────
+// DCA Card — Shows DCA plans + schedule
+// ────────────────────────────────────────────
+
+interface DCACardProps {
+  data: any;
+  onAction?: (action: string, payload?: any) => void;
+}
+
+export function DCACard({ data, onAction }: DCACardProps) {
+  if (!data) return null;
+
+  // Support both single plan and summary format
+  const plans = data.plans || (data.plan ? [data.plan] : data.allPlans || []);
+  const activePlans = plans.filter((p: any) => p.status === "active").length;
+
+  const statusEmoji: Record<string, string> = {
+    active: "🟢",
+    paused: "⏸️",
+    completed: "✅",
+    failed: "❌",
+    cancelled: "🚫",
+  };
+
+  const actionLabels: Record<string, string> = {
+    bonzo_supply: "Bonzo Lend",
+    stader_stake: "Stader HBARX",
+    wallet_hold: "Wallet Hold",
+  };
+
+  return (
+    <div
+      className="rounded-xl border border-purple-700/30 overflow-hidden"
+      style={{ background: "rgba(15, 12, 30, 0.8)" }}
+    >
+      {/* Header */}
+      <div
+        className="px-4 py-3 flex items-center justify-between border-b border-purple-900/25"
+        style={{ background: "rgba(139, 92, 246, 0.08)" }}
+      >
+        <div className="flex items-center gap-2">
+          <Calendar className="w-4 h-4 text-purple-400" />
+          <span className="text-sm font-medium text-gray-200">
+            DCA Schedule
+          </span>
+          <span className="text-[10px] text-purple-400/60 ml-1">
+            {activePlans} active
+          </span>
+        </div>
+      </div>
+
+      {/* Plans */}
+      <div className="p-3 space-y-2">
+        {plans.length === 0 ? (
+          <p className="text-xs text-gray-500 text-center py-2">
+            No DCA plans configured
+          </p>
+        ) : (
+          plans.map((plan: any, i: number) => (
+            <div
+              key={plan.id || i}
+              className="flex items-center justify-between px-3 py-2.5 rounded-lg border border-purple-900/20"
+              style={{ background: "rgba(20, 16, 40, 0.5)" }}
+            >
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs">{statusEmoji[plan.status] || "⚪"}</span>
+                  <span className="text-xs font-medium text-gray-200">
+                    {plan.amount} {plan.asset}
+                  </span>
+                  <span className="text-[10px] text-gray-500">{plan.frequency}</span>
+                  <span className="text-[10px] text-purple-400/70">
+                    → {actionLabels[plan.action] || plan.action}
+                  </span>
+                </div>
+                <div className="flex items-center gap-3 mt-1 text-[10px] text-gray-500">
+                  <span>{plan.executionCount ?? 0}x executed</span>
+                  <span>•</span>
+                  <span>
+                    {(plan.totalDeposited ?? 0).toFixed(2)} {plan.asset} total
+                  </span>
+                  {plan.status === "active" && plan.nextExecutionAt && (
+                    <>
+                      <span>•</span>
+                      <span className="text-purple-400/70">
+                        Next: {new Date(plan.nextExecutionAt).toLocaleString()}
+                      </span>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {/* Actions */}
+              {plan.status === "active" && onAction && (
+                <div className="flex gap-1 ml-2">
+                  <button
+                    onClick={() =>
+                      onAction("dca_action", {
+                        action: "pause",
+                        planId: plan.id,
+                      })
+                    }
+                    className="p-1 rounded hover:bg-purple-500/10 text-gray-500 hover:text-yellow-400 transition-colors"
+                    title="Pause"
+                  >
+                    <Pause className="w-3 h-3" />
+                  </button>
+                  <button
+                    onClick={() =>
+                      onAction("dca_action", {
+                        action: "cancel",
+                        planId: plan.id,
+                      })
+                    }
+                    className="p-1 rounded hover:bg-purple-500/10 text-gray-500 hover:text-red-400 transition-colors"
+                    title="Cancel"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                </div>
+              )}
+              {plan.status === "paused" && onAction && (
+                <button
+                  onClick={() =>
+                    onAction("dca_action", {
+                      action: "resume",
+                      planId: plan.id,
+                    })
+                  }
+                  className="p-1 rounded hover:bg-purple-500/10 text-gray-500 hover:text-green-400 transition-colors ml-2"
+                  title="Resume"
+                >
+                  <Play className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+          ))
+        )}
+
+        {/* Monthly estimate */}
+        {data.estimatedMonthlyDeposit &&
+          Object.keys(data.estimatedMonthlyDeposit).length > 0 && (
+            <div className="mt-2 pt-2 border-t border-purple-900/20 flex items-center justify-between text-[10px] text-gray-500">
+              <span>Est. monthly:</span>
+              <span className="text-purple-400/80 font-medium">
+                {Object.entries(data.estimatedMonthlyDeposit)
+                  .map(
+                    ([asset, amount]: [string, any]) =>
+                      `${Math.round(amount)} ${asset}`
+                  )
+                  .join(", ")}
+              </span>
+            </div>
+          )}
+      </div>
+    </div>
+  );
+}
+
+// ────────────────────────────────────────────
+// Stader HBARX Card — Shows staking data + strategy
+// ────────────────────────────────────────────
+
+interface StaderCardProps {
+  data: any;
+}
+
+export function StaderCard({ data }: StaderCardProps) {
+  if (!data) return null;
+
+  // Handle both info response and strategy result
+  const staderData = data.staderData || data;
+  const strategySteps = data.steps || null;
+  const isStrategy = !!strategySteps;
+
+  return (
+    <div
+      className="rounded-xl border border-blue-700/30 overflow-hidden"
+      style={{ background: "rgba(15, 12, 30, 0.8)" }}
+    >
+      {/* Header */}
+      <div
+        className="px-4 py-3 flex items-center justify-between border-b border-blue-900/25"
+        style={{ background: "rgba(59, 130, 246, 0.08)" }}
+      >
+        <div className="flex items-center gap-2">
+          <Droplets className="w-4 h-4 text-blue-400" />
+          <span className="text-sm font-medium text-gray-200">
+            {isStrategy ? "HBARX Strategy" : "Stader Labs — HBARX"}
+          </span>
+          {staderData.isSimulated && (
+            <span
+              className="text-[9px] px-1.5 py-0.5 rounded text-yellow-400"
+              style={{ background: "rgba(234, 179, 8, 0.1)" }}
+            >
+              Simulated
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div className="p-3 space-y-3">
+        {/* Key Metrics */}
+        <div className="grid grid-cols-3 gap-2">
+          <div
+            className="rounded-lg px-2.5 py-2 border border-blue-900/20"
+            style={{ background: "rgba(20, 16, 40, 0.5)" }}
+          >
+            <span className="text-[10px] text-gray-500">Exchange Rate</span>
+            <div className="text-xs text-blue-300 font-semibold">
+              {staderData.exchangeRate?.toFixed(6) || "—"}
+            </div>
+            <span className="text-[9px] text-gray-600">HBARX/HBAR</span>
+          </div>
+          <div
+            className="rounded-lg px-2.5 py-2 border border-blue-900/20"
+            style={{ background: "rgba(20, 16, 40, 0.5)" }}
+          >
+            <span className="text-[10px] text-gray-500">Staking APY</span>
+            <div className="text-xs text-emerald-400 font-semibold">
+              ~{staderData.stakingAPY || 0}%
+            </div>
+            <span className="text-[9px] text-gray-600">Protocol rewards</span>
+          </div>
+          <div
+            className="rounded-lg px-2.5 py-2 border border-blue-900/20"
+            style={{ background: "rgba(20, 16, 40, 0.5)" }}
+          >
+            <span className="text-[10px] text-gray-500">Total Pooled</span>
+            <div className="text-xs text-gray-200 font-semibold">
+              {staderData.totalPooledHbar
+                ? `${(staderData.totalPooledHbar / 1e9).toFixed(2)}B`
+                : "—"}
+            </div>
+            <span className="text-[9px] text-gray-600">HBAR staked</span>
+          </div>
+        </div>
+
+        {/* Strategy Steps (if executing strategy) */}
+        {isStrategy && strategySteps && (
+          <div className="space-y-1.5">
+            <span className="text-[10px] text-gray-500 font-medium uppercase tracking-wider">
+              Strategy Execution
+            </span>
+            {strategySteps.map((step: any) => {
+              const statusIcon =
+                step.status === "success" || step.status === "simulated"
+                  ? "✅"
+                  : step.status === "failed"
+                    ? "❌"
+                    : "⏳";
+              return (
+                <div
+                  key={step.step}
+                  className="flex items-start gap-2 px-3 py-2 rounded-lg border border-purple-900/15"
+                  style={{ background: "rgba(20, 16, 40, 0.3)" }}
+                >
+                  <span className="text-xs flex-shrink-0 mt-0.5">
+                    {statusIcon}
+                  </span>
+                  <div className="min-w-0">
+                    <div className="text-xs text-gray-300 font-medium">
+                      Step {step.step}: {step.name}
+                    </div>
+                    <div className="text-[10px] text-gray-500 mt-0.5">
+                      {step.description}
+                    </div>
+                    {step.txId && step.txId !== "simulated-stader-stake" && (
+                      <div className="text-[9px] text-purple-400/70 mt-0.5">
+                        TX: {step.txId}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Yield Breakdown */}
+        {!isStrategy && (
+          <div
+            className="rounded-lg px-3 py-2.5 border border-blue-900/15"
+            style={{ background: "rgba(20, 16, 40, 0.3)" }}
+          >
+            <div className="text-[10px] text-gray-500 font-medium mb-1.5">
+              💡 Yield-on-Yield Strategy
+            </div>
+            <div className="space-y-1 text-[10px]">
+              <div className="flex items-center gap-2">
+                <span className="text-blue-400">1.</span>
+                <span className="text-gray-400">
+                  Stake HBAR → HBARX (~{staderData.stakingAPY || 2.5}% APY)
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-blue-400">2.</span>
+                <span className="text-gray-400">
+                  Supply HBARX to Bonzo Lend (+ lending APY)
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-blue-400">3.</span>
+                <span className="text-gray-400">
+                  Borrow USDC against collateral (optional)
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ────────────────────────────────────────────
+// Health Monitor Card — Live gauge + alerts
+// ────────────────────────────────────────────
+
+interface HealthMonitorCardProps {
+  data: any;
+}
+
+export function HealthMonitorCard({ data }: HealthMonitorCardProps) {
+  if (!data) return null;
+
+  const hf = data.healthFactor;
+  const level = data.level || "safe";
+  const levelLabel = data.levelLabel || "Safe";
+  const levelColor = data.levelColor || "#10b981";
+
+  // Gauge calculation: map HF to 0-180 degrees
+  // HF 1.0 = 0° (critical), HF 3.0+ = 180° (safe)
+  const gaugeAngle = hf
+    ? Math.min(180, Math.max(0, ((Math.min(hf, 3) - 1) / 2) * 180))
+    : 180;
+
+  const alertCount = data.alerts?.length || 0;
+
+  return (
+    <div
+      className="rounded-xl border border-purple-700/30 overflow-hidden"
+      style={{ background: "rgba(15, 12, 30, 0.8)" }}
+    >
+      {/* Header */}
+      <div
+        className="px-4 py-3 flex items-center justify-between border-b border-purple-900/25"
+        style={{ background: "rgba(139, 92, 246, 0.08)" }}
+      >
+        <div className="flex items-center gap-2">
+          <Shield className="w-4 h-4 text-purple-400" />
+          <span className="text-sm font-medium text-gray-200">
+            Health Monitor
+          </span>
+          {data.isMonitoring && (
+            <span
+              className="text-[9px] px-1.5 py-0.5 rounded text-emerald-400"
+              style={{ background: "rgba(16, 185, 129, 0.1)" }}
+            >
+              ● Live
+            </span>
+          )}
+        </div>
+        {alertCount > 0 && (
+          <span
+            className="text-[10px] px-2 py-0.5 rounded-full text-orange-400 font-medium"
+            style={{ background: "rgba(249, 115, 22, 0.1)" }}
+          >
+            {alertCount} alert{alertCount > 1 ? "s" : ""}
+          </span>
+        )}
+      </div>
+
+      <div className="p-4">
+        {/* Health Factor Gauge */}
+        <div className="flex flex-col items-center mb-4">
+          <div className="relative w-40 h-20 overflow-hidden">
+            {/* Gauge background arc */}
+            <svg
+              viewBox="0 0 200 100"
+              className="w-full h-full"
+            >
+              {/* Background arc */}
+              <path
+                d="M 10 90 A 80 80 0 0 1 190 90"
+                fill="none"
+                stroke="rgba(139, 92, 246, 0.15)"
+                strokeWidth="12"
+                strokeLinecap="round"
+              />
+              {/* Colored arc */}
+              <path
+                d="M 10 90 A 80 80 0 0 1 190 90"
+                fill="none"
+                stroke={levelColor}
+                strokeWidth="12"
+                strokeLinecap="round"
+                strokeDasharray={`${gaugeAngle * 1.4} 999`}
+                style={{
+                  transition: "stroke-dasharray 1s ease-out",
+                }}
+              />
+              {/* Needle */}
+              <line
+                x1="100"
+                y1="90"
+                x2={100 + 60 * Math.cos(Math.PI - (gaugeAngle * Math.PI) / 180)}
+                y2={90 - 60 * Math.sin(Math.PI - (gaugeAngle * Math.PI) / 180)}
+                stroke={levelColor}
+                strokeWidth="2"
+                strokeLinecap="round"
+                style={{ transition: "all 1s ease-out" }}
+              />
+              <circle cx="100" cy="90" r="4" fill={levelColor} />
+            </svg>
+          </div>
+          <div className="text-center -mt-1">
+            <div className="text-2xl font-bold" style={{ color: levelColor }}>
+              {hf ? hf.toFixed(2) : "∞"}
+            </div>
+            <div className="text-xs text-gray-400">{levelLabel}</div>
+          </div>
+        </div>
+
+        {/* Key Metrics */}
+        <div className="grid grid-cols-3 gap-2 mb-3">
+          <div
+            className="rounded-lg px-2.5 py-2 border border-purple-900/20 text-center"
+            style={{ background: "rgba(20, 16, 40, 0.5)" }}
+          >
+            <span className="text-[10px] text-gray-500">Supplied</span>
+            <div className="text-xs text-emerald-400 font-semibold">
+              ${(data.totalSuppliedUSD || 0).toFixed(2)}
+            </div>
+          </div>
+          <div
+            className="rounded-lg px-2.5 py-2 border border-purple-900/20 text-center"
+            style={{ background: "rgba(20, 16, 40, 0.5)" }}
+          >
+            <span className="text-[10px] text-gray-500">Borrowed</span>
+            <div className="text-xs text-red-400 font-semibold">
+              ${(data.totalBorrowedUSD || 0).toFixed(2)}
+            </div>
+          </div>
+          <div
+            className="rounded-lg px-2.5 py-2 border border-purple-900/20 text-center"
+            style={{ background: "rgba(20, 16, 40, 0.5)" }}
+          >
+            <span className="text-[10px] text-gray-500">Net Worth</span>
+            <div className="text-xs text-gray-200 font-semibold">
+              ${(data.netWorthUSD || 0).toFixed(2)}
+            </div>
+          </div>
+        </div>
+
+        {/* Liquidation Distance */}
+        {data.liquidation && data.totalBorrowedUSD > 0 && (
+          <div
+            className="rounded-lg px-3 py-2.5 border border-purple-900/15 mb-3"
+            style={{ background: "rgba(20, 16, 40, 0.3)" }}
+          >
+            <div className="text-[10px] text-gray-500 font-medium mb-1">
+              📏 Liquidation Distance
+            </div>
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-gray-400">
+                Collateral can drop
+              </span>
+              <span className="text-yellow-400 font-semibold">
+                {data.liquidation.collateralDrop?.toFixed(1) || "—"}%
+              </span>
+            </div>
+            {data.liquidation.distanceUSD && (
+              <div className="flex items-center justify-between text-xs mt-1">
+                <span className="text-gray-400">USD buffer</span>
+                <span className="text-gray-200 font-medium">
+                  ${data.liquidation.distanceUSD.toFixed(2)}
+                </span>
+              </div>
+            )}
+            {data.liquidation.hbarLiqPrice && (
+              <div className="flex items-center justify-between text-xs mt-1">
+                <span className="text-gray-400">HBAR liquidation price</span>
+                <span className="text-red-400 font-medium">
+                  ${data.liquidation.hbarLiqPrice.toFixed(4)}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Asset Risk Breakdown */}
+        {data.assetRisks && data.assetRisks.length > 0 && (
+          <div className="mb-3">
+            <div className="text-[10px] text-gray-500 font-medium mb-1.5">
+              Position Breakdown
+            </div>
+            {data.assetRisks.map((asset: any) => (
+              <div
+                key={asset.symbol}
+                className="flex items-center justify-between text-[11px] py-1 px-1"
+              >
+                <span className="text-gray-300 font-medium w-12">
+                  {asset.symbol}
+                </span>
+                <div className="flex-1 mx-2">
+                  <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "rgba(20, 16, 40, 0.8)" }}>
+                    <div
+                      className="h-full rounded-full"
+                      style={{
+                        width: `${Math.min(100, asset.riskContribution)}%`,
+                        background: (asset.riskContribution || 0) > 60
+                          ? "#ef4444"
+                          : (asset.riskContribution || 0) > 30
+                            ? "#eab308"
+                            : "#10b981",
+                      }}
+                    />
+                  </div>
+                </div>
+                <span className="text-gray-500 text-[10px] w-16 text-right">
+                  {(asset.riskContribution ?? 0).toFixed(0)}% of debt
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Active Alerts */}
+        {data.alerts && data.alerts.length > 0 && (
+          <div className="space-y-1.5">
+            <div className="text-[10px] text-gray-500 font-medium">
+              🔔 Active Alerts
+            </div>
+            {data.alerts.slice(0, 3).map((alert: any) => {
+              const alertColors: Record<string, string> = {
+                critical: "border-red-500/30 text-red-400",
+                danger: "border-orange-500/30 text-orange-400",
+                at_risk: "border-yellow-500/30 text-yellow-400",
+                moderate: "border-yellow-500/20 text-yellow-300",
+                healthy: "border-emerald-500/20 text-emerald-400",
+                safe: "border-emerald-500/20 text-emerald-400",
+              };
+              return (
+                <div
+                  key={alert.id}
+                  className={`rounded-lg px-3 py-2 border text-[10px] ${alertColors[alert.level] || "border-gray-700 text-gray-400"}`}
+                  style={{ background: "rgba(20, 16, 40, 0.4)" }}
+                >
+                  <div className="font-medium">{alert.title}</div>
+                  <div className="text-gray-400 mt-0.5">{alert.message}</div>
+                  {alert.suggestedAction && (
+                    <div className="text-purple-400 mt-0.5">
+                      💡 {alert.suggestedAction}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* No positions state */}
+        {(!data.totalSuppliedUSD || data.totalSuppliedUSD === 0) &&
+          (!data.totalBorrowedUSD || data.totalBorrowedUSD === 0) && (
+            <div className="text-center py-3">
+              <Shield className="w-8 h-8 text-gray-600 mx-auto mb-2" />
+              <p className="text-xs text-gray-500">
+                No active positions to monitor
+              </p>
+              <p className="text-[10px] text-gray-600 mt-1">
+                Deposit assets first, then I'll track your health in real-time
+              </p>
+            </div>
+          )}
+
+        {/* Last updated */}
+        {data.lastUpdated && (
+          <div className="mt-2 pt-2 border-t border-purple-900/15 text-[9px] text-gray-600 text-center">
+            Last updated: {new Date(data.lastUpdated).toLocaleString()}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -822,6 +1423,10 @@ export type ChartType =
   | "ohlcv"
   | "sentiment"
   | "vaultcompare"
+  | "dca"
+  | "stader"
+  | "healthmonitor"
+
   // Action-based inline components (Jarvis mode)
   | "keeper"
   | "positions"
@@ -863,6 +1468,19 @@ export function detectCharts(message: string): ChartType[] {
     lower.includes("what am i holding")
   ) {
     charts.push("portfolio");
+  }
+
+  // DCA detection
+  if (lower.includes("dca") || lower.includes("dollar cost") || lower.includes("recurring deposit")) {
+    charts.push("dca");
+  }
+  // Stader / HBARX detection
+  if (lower.includes("hbarx") || lower.includes("stader") || lower.includes("liquid stak")) {
+    charts.push("stader");
+  }
+  // Health monitor detection
+  if (lower.includes("monitor") || lower.includes("health monitor") || lower.includes("liquidation risk")) {
+    charts.push("healthmonitor");
   }
 
   // Correlation matrix — explicit correlation requests
@@ -1672,6 +2290,12 @@ export function InlineChart({
       );
     case "vaultcompare":
       return <VaultCompareChart />;
+    case "dca":
+      return <DCACard data={data} onAction={onAction} />;
+    case "stader":
+      return <StaderCard data={data} />;
+    case "healthmonitor":
+      return <HealthMonitorCard data={data} />;  
     // ── Jarvis Mode Components ──
     case "keeper":
       return <KeeperResultInline data={data} />;

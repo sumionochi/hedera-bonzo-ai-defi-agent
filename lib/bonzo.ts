@@ -2,11 +2,15 @@
 // Bonzo Finance - Real API Integration
 // Docs: https://docs.bonzo.finance/hub/developer/bonzo-lend/lend-data-api
 //
-// NOTE: data.bonzo.finance is temporarily returning 500.
-// Per Bonzo docs, use mainnet-data-staging.bonzo.finance as fallback.
+// Base URL: https://data.bonzo.finance/
+// Per docs warning: use mainnet-data-staging.bonzo.finance temporarily
+//   for live data while EVM ERC-20 assets are being introduced.
+//
+// Market/price data uses mainnet API directly (prices are network-agnostic).
+// Account-specific data is handled on-chain via bonzo-execute.ts.
 // ============================================
 
-// Ordered by priority: staging first (currently working), then main
+// Per Bonzo docs warning: staging URL is preferred temporarily
 const BONZO_API_URLS = [
   "https://mainnet-data-staging.bonzo.finance",
   "https://data.bonzo.finance",
@@ -20,6 +24,8 @@ export interface BonzoReserve {
   htsAddress: string;
   evmAddress: string;
   atokenAddress: string;
+  stableDebtAddress: string;
+  variableDebtAddress: string;
   decimals: number;
   ltv: number;
   liquidationThreshold: number;
@@ -27,6 +33,7 @@ export interface BonzoReserve {
   active: boolean;
   frozen: boolean;
   variableBorrowingEnabled: boolean;
+  stableBorrowingEnabled: boolean;
   reserveFactor: number;
   utilizationRate: number;
   supplyAPY: number;
@@ -87,6 +94,8 @@ export interface BonzoStats {
   totalWithdrawsCount: number;
   totalBorrowsCount: number;
   totalRepaysCount: number;
+  totalLiquidationsCount: number;
+  totalFlashLoanCount: number;
   totalSuccessfulTransactions: number;
   totalFailedTransactions: number;
   activeUsers: string[];
@@ -94,9 +103,6 @@ export interface BonzoStats {
   timestampEnd: string;
 }
 
-/**
- * Fetch from Bonzo API with automatic URL fallback
- */
 async function bonzoFetch(path: string): Promise<any> {
   let lastError: Error | null = null;
 
@@ -104,7 +110,10 @@ async function bonzoFetch(path: string): Promise<any> {
     try {
       const url = `${baseUrl}${path}`;
       console.log(`[Bonzo] Trying: ${url}`);
-      const res = await fetch(url, { cache: "no-store" });
+      const res = await fetch(url, {
+        cache: "no-store",
+        signal: AbortSignal.timeout(5000),
+      });
 
       if (!res.ok) {
         console.warn(`[Bonzo] ${url} returned ${res.status}`);
@@ -124,9 +133,6 @@ async function bonzoFetch(path: string): Promise<any> {
   throw lastError || new Error("All Bonzo API URLs failed");
 }
 
-/**
- * GET /market — All reserves with APYs, utilization, prices
- */
 export async function getBonzoMarkets(): Promise<BonzoMarketData> {
   const data = await bonzoFetch("/market");
 
@@ -138,6 +144,8 @@ export async function getBonzoMarkets(): Promise<BonzoMarketData> {
     htsAddress: r.hts_address || "",
     evmAddress: r.evm_address || "",
     atokenAddress: r.atoken_address || "",
+    stableDebtAddress: r.stable_debt_address || "",
+    variableDebtAddress: r.variable_debt_address || "",
     decimals: r.decimals || 0,
     ltv: r.ltv || 0,
     liquidationThreshold: r.liquidation_threshold || 0,
@@ -145,6 +153,7 @@ export async function getBonzoMarkets(): Promise<BonzoMarketData> {
     active: r.active !== false,
     frozen: r.frozen === true,
     variableBorrowingEnabled: r.variable_borrowing_enabled !== false,
+    stableBorrowingEnabled: r.stable_borrowing_enabled === true,
     reserveFactor: r.reserve_factor || 0,
     utilizationRate:
       typeof r.utilization_rate === "number"
@@ -182,9 +191,6 @@ export async function getBonzoMarkets(): Promise<BonzoMarketData> {
   };
 }
 
-/**
- * GET /dashboard/{accountId} — Account positions, health factor, balances
- */
 export async function getBonzoAccountDashboard(
   accountId: string
 ): Promise<BonzoAccountDashboard> {
@@ -246,9 +252,6 @@ export async function getBonzoAccountDashboard(
   };
 }
 
-/**
- * GET /stats — 24-hour protocol statistics
- */
 export async function getBonzoStats(): Promise<BonzoStats> {
   const data = await bonzoFetch("/stats");
 
@@ -260,6 +263,8 @@ export async function getBonzoStats(): Promise<BonzoStats> {
     totalWithdrawsCount: data.total_withdraws_count || 0,
     totalBorrowsCount: data.total_borrows_count || 0,
     totalRepaysCount: data.total_repays_count || 0,
+    totalLiquidationsCount: data.total_liquidations_count || 0,
+    totalFlashLoanCount: data.total_flash_loan_count || 0,
     totalSuccessfulTransactions: data.total_successful_transactions || 0,
     totalFailedTransactions: data.total_failed_transactions || 0,
     activeUsers: data.active_users || [],
@@ -268,16 +273,23 @@ export async function getBonzoStats(): Promise<BonzoStats> {
   };
 }
 
-/**
- * GET /info — Protocol configuration (lending pool, oracle, etc.)
- */
 export async function getBonzoInfo() {
   return bonzoFetch("/info");
 }
 
-/**
- * Get best yield opportunities sorted by supply APY
- */
+export async function getBonzoDebtors() {
+  return bonzoFetch("/debtors");
+}
+
+export async function getBonzoTokenInfo() {
+  return bonzoFetch("/bonzo");
+}
+
+export async function getBonzoCirculation(): Promise<string> {
+  const data = await bonzoFetch("/bonzo/circulation");
+  return typeof data === "string" ? data : String(data);
+}
+
 export async function getBestYieldOpportunities(): Promise<BonzoReserve[]> {
   const { reserves } = await getBonzoMarkets();
   return reserves

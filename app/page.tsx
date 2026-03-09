@@ -186,7 +186,10 @@ export default function Home() {
         "**💰 Vault Actions**\n• \"Deposit 100 HBAR into HBAR-USDC vault\"\n• \"Withdraw from USDC-USDT vault\"\n• \"Harvest SAUCE-HBAR vault now\"\n• \"Switch vault to stable\"\n\n" +
         "**🏦 Lending Actions**\n• \"Supply 500 HBAR to Bonzo\"\n• \"Borrow 200 USDC\"\n• \"Repay my USDC loan\"\n\n" +
         "**👛 Wallet**\n• \"Connect wallet 0.0.XXXXX\" / \"Disconnect wallet\"\n• \"Show my wallet\" — balance & tokens\n\n" +
-        "**📈 Research**\n• \"Show backtest\" — VaultMind vs HODL\n• \"Show price chart\" — OHLCV candlestick",
+        "**📈 Research**\n• \"Show backtest\" — VaultMind vs HODL\n• \"Show price chart\" — OHLCV candlestick\n\n" +
+        "**📅 DCA (Dollar Cost Averaging)**\n• \"DCA 50 HBAR daily\" — set up recurring deposits\n• \"DCA 100 USDC weekly\" — weekly accumulation\n• \"Show DCA status\" / \"Cancel DCA\"\n• \"Pause DCA\" / \"Resume DCA\"\n\n" +
+        "**🔷 Stader HBARX Strategy**\n• \"HBARX strategy with 100 HBAR\" — full stake→supply loop\n• \"Stake 50 HBAR with Stader\" — liquid staking only\n• \"Show HBARX info\" — exchange rate & APY\n\n" +
+        "**🛡️ Health Monitor**\n• \"Health check\" — position health + liquidation risk\n• \"Monitor positions\" — real-time tracking",
       timestamp: new Date(),
     },
   ]);
@@ -312,6 +315,21 @@ export default function Home() {
         pulseCard("history");
         if (json.data.sentiment) pulseCard("sentiment");
       }
+
+      // Execute due DCA plans after keeper cycle
+      try {
+        const dcaRes = await fetch("/api/dca", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "execute_due" }),
+        });
+        const dcaJson = await dcaRes.json();
+        if (dcaJson.success && dcaJson.data?.executions?.length > 0) {
+          console.log(`[Auto-Keeper] DCA: ${dcaJson.data.executions.length} execution(s)`);
+        }
+      } catch (err) {
+        console.warn("[Auto-Keeper] DCA execution check failed:", err);
+      }
     } catch (err: any) {
       console.error("Auto-keeper error:", err);
     } finally {
@@ -375,7 +393,7 @@ export default function Home() {
     }
   }
 
-  async function fetchPositions(overrideAccountId?: string) {
+  async function fetchPositions(overrideAccountId?: string): Promise<PortfolioData | null> {
     try {
       const acct = overrideAccountId || connectedAccount || "";
       const url = acct
@@ -385,9 +403,12 @@ export default function Home() {
       const json = await res.json();
       if (json.success) {
         setPortfolio(json.data);
+        return json.data;
       }
+      return null;
     } catch (err: any) {
       console.error("Failed to fetch positions:", err);
+      return null;
     } finally {
       setPositionsLoading(false);
     }
@@ -539,7 +560,11 @@ export default function Home() {
             timestamp: new Date(),
           }]);
           pulseCard("positions");
-          if (connectedAccount) fetchPositions(connectedAccount);
+          // Delay fetch — Hedera mirror node needs time to reflect new state
+          if (connectedAccount) {
+            setTimeout(() => fetchPositions(connectedAccount), 3000);
+            setTimeout(() => fetchPositions(connectedAccount), 8000);
+          }
         } else {
           setMessages((prev) => [...prev, {
             id, role: "assistant",
@@ -600,7 +625,11 @@ export default function Home() {
             timestamp: new Date(),
           }]);
           pulseCard("positions");
-          if (connectedAccount) fetchPositions(connectedAccount);
+          // Delay fetch — Hedera mirror node needs time to reflect new state
+          if (connectedAccount) {
+            setTimeout(() => fetchPositions(connectedAccount), 3000);
+            setTimeout(() => fetchPositions(connectedAccount), 8000);
+          }
         } else {
           setMessages((prev) => [...prev, {
             id, role: "assistant",
@@ -620,7 +649,50 @@ export default function Home() {
         }]);
       }
       await stopThinking();
-      if (connectedAccount) fetchPositions(connectedAccount);
+      // Additional delayed refresh for mirror node propagation
+      if (connectedAccount) {
+        setTimeout(() => fetchPositions(connectedAccount), 5000);
+      }
+
+    } else if (action === "dca_action" && payload) {
+      startThinking();
+      try {
+        const apiAction = payload.action; // "pause", "cancel", or "resume"
+        const planId = payload.planId;
+        const res = await fetch("/api/dca", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: apiAction, planId }),
+        });
+        const json = await res.json();
+        if (json.success) {
+          const emoji = apiAction === "cancel" ? "🚫" : apiAction === "pause" ? "⏸️" : "▶️";
+          // Refresh DCA summary
+          const refreshRes = await fetch("/api/dca");
+          const refreshJson = await refreshRes.json();
+          const summary = refreshJson.success ? refreshJson.data : { plans: [], activePlans: 0 };
+          setMessages((prev) => [...prev, {
+            id, role: "assistant",
+            content: `${emoji} **DCA plan ${apiAction}d successfully.**${json.data?.hcsLog?.logged ? ` ✓ _Logged to HCS (seq #${json.data.hcsLog.sequenceNumber})_` : ""}`,
+            charts: ["dca"],
+            actionData: { dca: summary },
+            timestamp: new Date(),
+          }]);
+        } else {
+          setMessages((prev) => [...prev, {
+            id, role: "assistant",
+            content: `❌ DCA ${apiAction} failed: ${json.error}`,
+            timestamp: new Date(),
+          }]);
+        }
+      } catch (err: any) {
+        setMessages((prev) => [...prev, {
+          id, role: "assistant",
+          content: `❌ DCA action error: ${err.message}`,
+          timestamp: new Date(),
+        }]);
+      }
+      await stopThinking();
 
     } else if (action.startsWith("cancel_")) {
       setMessages((prev) => [...prev, {
@@ -696,6 +768,84 @@ export default function Home() {
     if (hfDangerMatch) return { action: "strategy_set", params: { key: "healthFactorDanger", value: parseFloat(hfDangerMatch[1]), label: "HF Danger Level" } };
     const yieldMatch = lower.match(/set\s+(?:min\s+)?yield\s+(?:differential?\s+)?(?:to\s+)?(\d+\.?\d*)/);
     if (yieldMatch) return { action: "strategy_set", params: { key: "minYieldDifferential", value: parseFloat(yieldMatch[1]), label: "Min Yield Differential" } };
+
+    // ── DCA Commands (must be before isQuestion to catch "DCA 50 HBAR daily") ──
+    const dcaCreateMatch = lower.match(
+      /(?:dca|dollar cost average?|auto[- ]?(?:deposit|invest|buy))\s+(\d+\.?\d*)\s+(\w+)\s+(?:every\s+)?(hourly|daily|weekly|biweekly|monthly)/
+    );
+    if (dcaCreateMatch) {
+      const amount = parseFloat(dcaCreateMatch[1]);
+      const asset = dcaCreateMatch[2].toUpperCase();
+      const frequency = dcaCreateMatch[3].toLowerCase() as "hourly" | "daily" | "weekly" | "biweekly" | "monthly";
+      let dcaAction = "bonzo_supply";
+      if (lower.includes("stader") || lower.includes("stake")) dcaAction = "stader_stake";
+      if (lower.includes("hold") || lower.includes("wallet")) dcaAction = "wallet_hold";
+      return {
+        action: "dca_create",
+        params: { amount, asset, frequency, dcaAction },
+      };
+    }
+    if (lower.includes("show dca") || lower.includes("dca status") || lower.includes("my dca") || lower.includes("dca plans") || lower.includes("dca schedule")) {
+      return { action: "dca_show" };
+    }
+    if (lower.includes("cancel all dca") || lower.includes("stop all dca")) {
+      return { action: "dca_cancel_all" };
+    }
+    if (lower.includes("pause all dca")) {
+      return { action: "dca_pause_all" };
+    }
+    // "pause latest 2 DCA", "cancel latest 3 DCA", "pause 2 dca"
+    const dcaCountMatch = lower.match(/(?:pause|cancel|stop|remove)\s+(?:latest\s+|last\s+|recent\s+)?(\d+)\s*dca/);
+    if (dcaCountMatch) {
+      const count = parseInt(dcaCountMatch[1]);
+      const isPause = lower.includes("pause");
+      return { action: isPause ? "dca_pause" : "dca_cancel", params: { count } };
+    }
+    if (lower.includes("cancel dca") || lower.includes("stop dca") || lower.includes("remove dca") || lower.includes("cancel latest dca")) {
+      return { action: "dca_cancel", params: { count: 1 } };
+    }
+    if (lower.includes("pause dca") || lower.includes("pause latest dca")) {
+      return { action: "dca_pause", params: { count: 1 } };
+    }
+    if (lower.includes("resume dca") || lower.includes("unpause dca") || lower.includes("restart dca") || lower.includes("resume all dca")) {
+      return { action: "dca_resume" };
+    }
+
+    // ── Stader / HBARX Commands ──
+    const staderStrategyMatch = lower.match(
+      /(?:hbarx|stader)\s+strategy\s+(?:with\s+)?(\d+\.?\d*)\s*(?:hbar)?/
+    );
+    if (staderStrategyMatch) {
+      return {
+        action: "stader_strategy",
+        params: {
+          amount: parseFloat(staderStrategyMatch[1]),
+          withBorrow: lower.includes("borrow") || lower.includes("leverage"),
+        },
+      };
+    }
+    const stakeHbarMatch = lower.match(/stake\s+(\d+\.?\d*)\s*(?:hbar)?/);
+    if (stakeHbarMatch && (lower.includes("stader") || lower.includes("hbarx") || lower.includes("liquid"))) {
+      return {
+        action: "stader_stake",
+        params: { amount: parseFloat(stakeHbarMatch[1]) },
+      };
+    }
+    if (
+      (lower.includes("hbarx") || lower.includes("stader")) &&
+      (lower.includes("info") || lower.includes("rate") || lower.includes("apy") || lower.includes("show"))
+    ) {
+      return { action: "stader_info" };
+    }
+
+    // ── Health Monitor ──
+    if (
+      lower.includes("health monitor") || lower.includes("monitor positions") ||
+      lower.includes("position health") || lower.includes("liquidation risk") ||
+      lower.includes("health check")
+    ) {
+      return { action: "health_monitor" };
+    }
 
     const isQuestion = lower.startsWith("when") || lower.startsWith("how") || lower.startsWith("should") || lower.startsWith("why") || lower.startsWith("what") || lower.startsWith("can") || lower.includes("?");
 
@@ -1158,17 +1308,291 @@ export default function Home() {
           if (p.filterAction) parts.push(`**${p.filterAction}**`);
           parts.push(p.count === 1 ? "entry" : "entries");
           responseContent = `📋 Showing ${parts.join(" ")} from the HCS audit trail:`;
-        }
 
-        // Inject state data for display-only components
+        // ═══ DCA Handlers ═══
+        } else if (actionCmd.action === "dca_create") {
+          const p = actionCmd.params || {};
+          const reqAsset = p.asset || "HBAR";
+          const reqAmount = p.amount || 50;
+          const reqFreq = p.frequency || "daily";
+          const reqAction = p.dcaAction || "bonzo_supply";
+          try {
+            const res = await fetch("/api/dca", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                action: "create",
+                params: {
+                  asset: reqAsset,
+                  amount: reqAmount,
+                  frequency: reqFreq,
+                  action: reqAction,
+                },
+              }),
+            });
+            const json = await res.json();
+            if (json.success) {
+              const plan = json.data?.plan || json.data || {};
+              const displayAmount = plan.amount ?? reqAmount;
+              const displayAsset = plan.asset ?? reqAsset;
+              const displayFreq = plan.frequency ?? reqFreq;
+              const displayAction = plan.action ?? reqAction;
+              const displayNext = plan.nextExecutionAt ? new Date(plan.nextExecutionAt).toLocaleString() : "soon";
+              const displayId = plan.id ?? "pending";
+              const hcsLog = json.data?.hcsLog || plan.hcsLog;
+              const targetLabel = displayAction === "bonzo_supply" ? "Bonzo Lend Supply" : displayAction === "stader_stake" ? "Stader HBARX Staking" : "Wallet Hold";
+              responseContent =
+                `📅 **DCA Plan Created!**\n` +
+                `• Amount: **${displayAmount} ${displayAsset}** ${displayFreq}\n` +
+                `• Target: ${targetLabel}\n` +
+                `• Next execution: ${displayNext}\n` +
+                `• Plan ID: \`${displayId}\`\n\n` +
+                `The keeper will execute this automatically on schedule. Say "show DCA" to see all plans.` +
+                (hcsLog?.logged ? `\n\n✓ _Logged to HCS (seq #${hcsLog.sequenceNumber})_` : "");
+              actionData.dca = {
+                plans: [{
+                  ...plan,
+                  amount: displayAmount,
+                  asset: displayAsset,
+                  frequency: displayFreq,
+                  action: displayAction,
+                  status: plan.status || "active",
+                  executionCount: plan.executionCount ?? 0,
+                  totalDeposited: plan.totalDeposited ?? 0,
+                  nextExecutionAt: plan.nextExecutionAt || new Date().toISOString(),
+                }],
+                totalActive: 1,
+              };
+              if (!detectedCharts.includes("dca")) detectedCharts.push("dca");
+            } else {
+              responseContent = `❌ DCA creation failed: ${json.error}`;
+            }
+          } catch (err: any) {
+            responseContent = `❌ DCA error: ${err.message}`;
+          }
+
+        } else if (actionCmd.action === "dca_show") {
+          try {
+            const res = await fetch("/api/dca");
+            const json = await res.json();
+            if (json.success) {
+              const summary = json.data || { plans: [], totalActive: 0 };
+              const plans = summary.plans || [];
+              if (plans.length === 0) {
+                responseContent = `📅 **No DCA plans configured.**\nSet one up: "DCA 50 HBAR daily" or "DCA 100 USDC weekly"`;
+              } else {
+                responseContent =
+                  `📅 **DCA Summary** — ${summary.activePlans || 0} active plan(s)\n\n` +
+                  plans.map((p: any) =>
+                    `• **${p.amount ?? "?"} ${p.asset ?? "?"}** ${p.frequency ?? "?"} → ${p.action === "bonzo_supply" ? "Bonzo Supply" : p.action || "supply"} ` +
+                    `(${p.status || "?"}, ${p.executionCount ?? 0}x executed, ${(p.totalDeposited ?? 0).toFixed(2)} total)`
+                  ).join("\n");
+              }
+              actionData.dca = summary;
+              if (!detectedCharts.includes("dca")) detectedCharts.push("dca");
+            }
+          } catch (err: any) {
+            responseContent = `❌ Failed to fetch DCA plans: ${err.message}`;
+          }
+
+        } else if (actionCmd.action === "dca_cancel_all") {
+          try {
+            const res = await fetch("/api/dca", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "cancel_all" }),
+            });
+            const json = await res.json();
+            if (json.success) {
+              responseContent = `🚫 **Cancelled ${json.data.cancelled} DCA plan(s).** ${json.data.hcsLogged} logged to HCS.`;
+              actionData.dca = { plans: [], totalActive: 0 };
+              if (!detectedCharts.includes("dca")) detectedCharts.push("dca");
+            }
+          } catch (err: any) {
+            responseContent = `❌ Cancel error: ${err.message}`;
+          }
+
+        } else if (actionCmd.action === "dca_pause_all") {
+          try {
+            const listRes = await fetch("/api/dca");
+            const listJson = await listRes.json();
+            const activePlans = (listJson.data?.plans || []).filter((p: any) => p.status === "active");
+            let paused = 0;
+            for (const plan of activePlans) {
+              const res = await fetch("/api/dca", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "pause", planId: plan.id }),
+              });
+              const json = await res.json();
+              if (json.success) paused++;
+            }
+            responseContent = `⏸️ **Paused ${paused} DCA plan(s).**`;
+            const refreshRes = await fetch("/api/dca");
+            const refreshJson = await refreshRes.json();
+            if (refreshJson.success) actionData.dca = refreshJson.data;
+            if (!detectedCharts.includes("dca")) detectedCharts.push("dca");
+          } catch (err: any) {
+            responseContent = `❌ Pause all error: ${err.message}`;
+          }
+
+        } else if (actionCmd.action === "dca_cancel" || actionCmd.action === "dca_pause" || actionCmd.action === "dca_resume") {
+          try {
+            const listRes = await fetch("/api/dca");
+            const listJson = await listRes.json();
+            const allPlans = listJson.data?.plans || [];
+            const targetStatus = actionCmd.action === "dca_resume" ? "paused" : "active";
+            const matching = allPlans.filter((p: any) => p.status === targetStatus);
+            const count = actionCmd.params?.count || 1;
+
+            if (matching.length === 0) {
+              responseContent = `No ${targetStatus} DCA plans found.`;
+            } else {
+              const apiAction = actionCmd.action!.replace("dca_", "");
+              // Sort by creation time desc (newest first) and take `count`
+              const sorted = matching.sort((a: any, b: any) =>
+                new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+              );
+              const targets = sorted.slice(0, Math.min(count, sorted.length));
+              const results: string[] = [];
+
+              for (const target of targets) {
+                const res = await fetch("/api/dca", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ action: apiAction, planId: target.id }),
+                });
+                const json = await res.json();
+                if (json.success) {
+                  results.push(`${target.amount} ${target.asset} ${target.frequency}`);
+                }
+              }
+
+              if (results.length > 0) {
+                const emoji = apiAction === "cancel" ? "🚫" : apiAction === "pause" ? "⏸️" : "▶️";
+                responseContent = `${emoji} **${apiAction.charAt(0).toUpperCase() + apiAction.slice(1)}d ${results.length} DCA plan(s):**\n` +
+                  results.map(r => `• ${r}`).join("\n");
+              } else {
+                responseContent = `❌ Failed to ${apiAction} any plans.`;
+              }
+
+              // Refresh summary
+              const refreshRes = await fetch("/api/dca");
+              const refreshJson = await refreshRes.json();
+              if (refreshJson.success) actionData.dca = refreshJson.data;
+            }
+            if (!detectedCharts.includes("dca")) detectedCharts.push("dca");
+          } catch (err: any) {
+            responseContent = `❌ DCA ${actionCmd.action} error: ${err.message}`;
+          }
+
+        // ═══ Stader / HBARX Handlers ═══
+        } else if (actionCmd.action === "stader_strategy") {
+          if (!connectedAccount) {
+            responseContent = `🔌 **Wallet not connected.** Connect first with "connect wallet 0.0.XXXXX".`;
+          } else {
+            const p = actionCmd.params || {};
+            try {
+              const res = await fetch("/api/stader", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "strategy", amount: p.amount, withBorrow: p.withBorrow || false }),
+              });
+              const json = await res.json();
+              if (json.success) {
+                responseContent = json.data.summary || `🔷 HBARX strategy executed with ${p.amount} HBAR`;
+                actionData.stader = json.data;
+                if (!detectedCharts.includes("stader")) detectedCharts.push("stader");
+                pulseCard("positions");
+                if (connectedAccount) setTimeout(() => fetchPositions(connectedAccount), 3000);
+              } else {
+                responseContent = `❌ Strategy failed: ${json.error}`;
+              }
+            } catch (err: any) {
+              responseContent = `❌ Stader strategy error: ${err.message}`;
+            }
+          }
+
+        } else if (actionCmd.action === "stader_stake") {
+          if (!connectedAccount) {
+            responseContent = `🔌 **Wallet not connected.** Connect first.`;
+          } else {
+            const p = actionCmd.params || {};
+            try {
+              const res = await fetch("/api/stader", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "stake", amount: p.amount }),
+              });
+              const json = await res.json();
+              if (json.success) {
+                responseContent =
+                  `🔷 **Staked ${p.amount} HBAR with Stader Labs**\n\n` +
+                  `Exchange rate: 1 HBAR = ${json.data.staderData?.exchangeRate?.toFixed(6) || "~0.8247"} HBARX\n` +
+                  `APY: ~${json.data.staderData?.stakingAPY || 2.5}%\n\n` +
+                  `💡 Next: "Supply HBARX to Bonzo" to earn staking + lending yield.`;
+                actionData.stader = json.data;
+                if (!detectedCharts.includes("stader")) detectedCharts.push("stader");
+              } else {
+                responseContent = `❌ Stake failed: ${json.error}`;
+              }
+            } catch (err: any) {
+              responseContent = `❌ Stader error: ${err.message}`;
+            }
+          }
+
+        } else if (actionCmd.action === "stader_info") {
+          try {
+            const res = await fetch("/api/stader");
+            const json = await res.json();
+            if (json.success) {
+              responseContent = json.data.formatted || "🔷 Stader HBARX info loaded.";
+              actionData.stader = json.data;
+              if (!detectedCharts.includes("stader")) detectedCharts.push("stader");
+            }
+          } catch (err: any) {
+            responseContent = `❌ Failed to fetch Stader data: ${err.message}`;
+          }
+
+        // ═══ Health Monitor Handler ═══
+        } else if (actionCmd.action === "health_monitor") {
+          try {
+            if (portfolio) {
+              const hbarPrice = sentiment?.dataPoints?.hbarPrice;
+              await fetch("/api/health", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "update", portfolioData: portfolio, hbarPrice }),
+              });
+            }
+            const res = await fetch("/api/health?format=ui");
+            const json = await res.json();
+            if (json.success) {
+              actionData.healthmonitor = json.data;
+              if (!detectedCharts.includes("healthmonitor")) detectedCharts.push("healthmonitor");
+              responseContent = portfolio && portfolio.positions.length > 0
+                ? `🛡️ **Health Monitor Active** — tracking your positions in real-time.`
+                : `🛡️ **Health Monitor** — no active positions to track. Deposit assets first.`;
+            }
+          } catch (err: any) {
+            responseContent = `❌ Health monitor error: ${err.message}`;
+          }
+        }
         if (detectedCharts.includes("history")) {
           actionData.history = { history: keeperHistory };
         }
         if (detectedCharts.includes("walletinfo") && !actionData.walletinfo) {
           actionData.walletinfo = walletData ? { ...walletData, accountId: connectedAccount } : null;
         }
-        if (detectedCharts.includes("positions") && portfolio) {
-          actionData.positions = { ...portfolio, accountId: connectedAccount };
+        if (detectedCharts.includes("positions")) {
+          if (connectedAccount) {
+            const freshPositions = await fetchPositions(connectedAccount);
+            if (freshPositions) {
+              actionData.positions = { ...freshPositions, accountId: connectedAccount };
+            }
+          } else if (portfolio) {
+            actionData.positions = { ...portfolio, accountId: connectedAccount };
+          }
         }
 
         const assistantMessage: ChatMessage = {
@@ -1190,8 +1614,18 @@ export default function Home() {
       if (detectedCharts.includes("walletinfo")) {
         actionData.walletinfo = walletData ? { ...walletData, accountId: connectedAccount } : null;
       }
-      if (detectedCharts.includes("positions") && portfolio) {
-        actionData.positions = { ...portfolio, accountId: connectedAccount };
+      if (detectedCharts.includes("positions")) {
+        if (connectedAccount) {
+          // Live-fetch positions from Bonzo — mirror node may have stale data after recent tx
+          const freshPositions = await fetchPositions(connectedAccount);
+          if (freshPositions) {
+            actionData.positions = { ...freshPositions, accountId: connectedAccount };
+          } else if (portfolio) {
+            actionData.positions = { ...portfolio, accountId: connectedAccount };
+          }
+        } else if (portfolio) {
+          actionData.positions = { ...portfolio, accountId: connectedAccount };
+        }
       }
       if (detectedCharts.includes("market") && markets.length > 0) {
         actionData.market = { markets };
@@ -1210,6 +1644,9 @@ export default function Home() {
         positions: "📊 Here's your **Bonzo Lend positions** — live data from the Bonzo Finance protocol:",
         walletinfo: "👛 Here's your **wallet info** — live from Hedera Mirror Node:",
         apycompare: "📊 Here's the **APY comparison** across Bonzo Lend supply, borrow, and vault strategies:",
+        dca: "📅 Here's your **DCA schedule** — automated dollar-cost averaging with HCS on-chain persistence:",
+        stader: "🔷 Here's your **Stader HBARX** info — liquid staking yield on Hedera:",
+        healthmonitor: "🛡️ Here's your **Position Health Monitor** — real-time risk tracking with liquidation alerts:",
       };
 
       const localCharts = detectedCharts.filter(c => c in LOCAL_CHART_MESSAGES);
@@ -1345,10 +1782,7 @@ export default function Home() {
                 Next: {formatCountdown(countdown)}
               </div>
             )}
-            <div className="flex items-center gap-1.5 text-[11px] text-purple-300/80 rounded-xl px-3 py-1.5 border border-purple-800/30" style={{ background: "rgba(30, 20, 60, 0.4)" }}>
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-              Testnet
-            </div>
+           
             <a
               href="https://testnet.bonzo.finance"
               target="_blank"
@@ -1829,6 +2263,9 @@ function getDynamicSuggestions(
   if (lastCharts.includes("lendingaction")) return ["Show my positions", "Show audit log", "Run dry run"];
   if (lastCharts.includes("confirm")) return ["Show audit log", "Show my positions", "Run dry run"];
   if (lastCharts.includes("inlineerror")) return ["Connect wallet 0.0.5907362", "Show my wallet", "Run dry run"];
+  if (lastCharts.includes("dca")) return ["Show my positions", "Cancel DCA", "DCA 100 USDC weekly"];
+  if (lastCharts.includes("stader")) return ["HBARX strategy with 100 HBAR", "Show my positions", "Show HBARX info"];
+  if (lastCharts.includes("healthmonitor")) return ["Repay my loan", "Supply more HBAR", "Run dry run"];
 
   if (lastContent.includes("deposit") || lastContent.includes("supply")) return ["Check my health factor", "Borrow against collateral", "Show audit log"];
   if (lastContent.includes("borrow") || lastContent.includes("loan")) return ["Repay my loan", "Check health factor", "Show my positions"];
