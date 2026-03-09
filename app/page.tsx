@@ -1722,7 +1722,7 @@ export default function Home() {
   // ============================================
 
   return (
-    <div className="min-h-screen flex flex-col" style={{ background: "linear-gradient(180deg, #0c0a1d 0%, #0a0818 50%, #0d0b1e 100%)" }}>
+    <div className="flex flex-col h-screen overflow-hidden" style={{ background: "linear-gradient(180deg, #0c0a1d 0%, #0a0818 50%, #0d0b1e 100%)" }}>
       {/* ═══ HEADER — Bonzo-style nav ═══ */}
       <header className="border-b border-purple-900/30 backdrop-blur-xl sticky top-0 z-50" style={{ background: "rgba(12, 10, 29, 0.85)" }}>
         <div className="max-w-[1440px] mx-auto px-6 py-3.5 flex items-center justify-between">
@@ -1796,7 +1796,7 @@ export default function Home() {
       </header>
 
       {/* ═══ MAIN CONTENT ═══ */}
-      <main className="flex-1 max-w-[1440px] mx-auto w-full px-6 py-6">
+      <main className="flex-1 mx-auto w-full px-6 py-6">
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-full">
           {/* ═══ LEFT SIDEBAR — Dashboard Panels ═══ */}
           <div className="lg:col-span-1 space-y-4 overflow-y-auto max-h-[calc(100vh-120px)] pr-1 scrollbar-thin">
@@ -1975,7 +1975,7 @@ export default function Home() {
             <div className="rounded-b-xl rounded-tr-xl border border-purple-900/30 overflow-hidden flex-1" style={{ background: "rgba(12, 10, 25, 0.4)" }}>
               {/* Chat Tab */}
               {activeTab === "chat" && (
-                <div className="flex flex-col min-h-[550px] h-full">
+                <div className="flex flex-col h-[calc(100vh-140px)]">
                   {/* Chat Header */}
                   <div className="px-5 py-3 border-b border-purple-900/20 flex items-center gap-2" style={{ background: "rgba(15, 12, 30, 0.4)" }}>
                     <div className="w-6 h-6 rounded-lg flex items-center justify-center" style={{ background: "linear-gradient(135deg, #7c3aed 0%, #a855f7 100%)" }}>
