@@ -9,6 +9,7 @@ import {
   executeDueDCAPlans,
   type DCACreateParams,
 } from "@/lib/dca";
+import { getHbarPrice } from "@/lib/pyth";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
@@ -121,10 +122,32 @@ export async function POST(req: NextRequest) {
 
       case "execute_due":
       case "execute-due": {
-        const hbarPrice = body.hbarPrice || 0;
+        // Get real HBAR price from Pyth
+        let hbarPrice = body.hbarPrice || 0;
+        if (!hbarPrice || hbarPrice === 0) {
+          try {
+            const pythPrice = await getHbarPrice();
+            hbarPrice = pythPrice.price;
+            console.log(
+              `[API/dca] Using Pyth HBAR price: $${hbarPrice.toFixed(4)}`
+            );
+          } catch {
+            console.warn(
+              "[API/dca] Pyth price fetch failed, using provided price"
+            );
+          }
+        }
+
         const dryRun = body.dryRun === true;
         const executions = await executeDueDCAPlans(hbarPrice, dryRun);
-        return NextResponse.json({ success: true, data: { executions } });
+        return NextResponse.json({
+          success: true,
+          data: {
+            executions,
+            hbarPrice,
+            priceSource: "pyth",
+          },
+        });
       }
 
       default:

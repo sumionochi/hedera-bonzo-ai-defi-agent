@@ -14,7 +14,10 @@ export async function GET() {
     const data = await getStaderData();
     return NextResponse.json({
       success: true,
-      data: { ...data, formatted: formatStaderInfoForChat(data) },
+      data: {
+        ...data,
+        formatted: formatStaderInfoForChat(data),
+      },
     });
   } catch (error: any) {
     return NextResponse.json(
@@ -45,6 +48,9 @@ export async function POST(req: NextRequest) {
             result,
             staderData,
             hbarxReceived: amount * staderData.exchangeRate,
+            hbarPriceUSD: staderData.hbarPriceUSD,
+            hbarxPriceUSD: staderData.hbarxPriceUSD,
+            priceSource: staderData.priceSource,
           },
         });
       }
@@ -77,6 +83,9 @@ export async function POST(req: NextRequest) {
             balance,
             hbarValue: balance / staderData.exchangeRate,
             exchangeRate: staderData.exchangeRate,
+            balanceUSD: balance * staderData.hbarxPriceUSD,
+            hbarPriceUSD: staderData.hbarPriceUSD,
+            priceSource: staderData.priceSource,
           },
         });
       }
@@ -84,7 +93,10 @@ export async function POST(req: NextRequest) {
         const data = await getStaderData();
         return NextResponse.json({
           success: true,
-          data: { ...data, formatted: formatStaderInfoForChat(data) },
+          data: {
+            ...data,
+            formatted: formatStaderInfoForChat(data),
+          },
         });
       }
       default:

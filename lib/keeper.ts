@@ -1,6 +1,14 @@
 // ============================================
-// VaultMind Keeper — Decision Engine
-// The core brain: gather data → analyze → decide → execute → log
+// VaultMind Keeper — Multi-Agent Decision Engine
+// ============================================
+// Now powered by the multi-agent architecture:
+//   Sentinel → Strategist → Auditor → Executor → Auditor
+//
+// This file serves as the backward-compatible wrapper.
+// The real logic lives in lib/agents/*.
+//
+// DCA AUTO-LOOP: Integrated into every keeper tick so DCA
+// plans execute automatically when auto-keeper is running.
 // ============================================
 
 import {
@@ -15,21 +23,26 @@ import {
   type AgentDecisionLog,
 } from "./hcs";
 import { chat } from "./agent";
+import {
+  runMultiAgentCycle,
+  runDCATick,
+  type OrchestratorCycleResult,
+} from "./agents/orchestrator";
 
 // ── Types ──────────────────────────────────────────────────
 
 export type KeeperAction =
-  | "HARVEST" // Withdraw rewards, convert to stable
-  | "HOLD" // No action needed
-  | "REBALANCE" // Shift allocation between reserves
-  | "EXIT_TO_STABLE" // Emergency: repay debt / exit volatile position
-  | "INCREASE_POSITION" // Bullish: deposit more
-  | "REPAY_DEBT"; // Health factor low: repay to avoid liquidation
+  | "HARVEST"
+  | "HOLD"
+  | "REBALANCE"
+  | "EXIT_TO_STABLE"
+  | "INCREASE_POSITION"
+  | "REPAY_DEBT";
 
 export interface KeeperDecision {
   action: KeeperAction;
   reason: string;
-  confidence: number; // 0-1
+  confidence: number;
   params?: {
     amount?: string;
     tokenSymbol?: string;
@@ -80,6 +93,11 @@ export interface KeeperCycleResult {
     sequenceNumber?: number;
     error?: string;
   };
+  // Multi-agent fields
+  vaultDecision?: any;
+  dcaExecutions?: number;
+  agentsUsed?: string[];
+  multiAgentResult?: OrchestratorCycleResult;
   timestamp: string;
   durationMs: number;
 }
@@ -87,20 +105,13 @@ export interface KeeperCycleResult {
 // ── Strategy Configuration ─────────────────────────────────
 
 export interface StrategyConfig {
-  // Sentiment thresholds
-  bearishThreshold: number; // Below this → HARVEST (default: -30)
-  bullishThreshold: number; // Above this → INCREASE_POSITION (default: 50)
-  confidenceMinimum: number; // Min confidence to act (default: 0.6)
-
-  // Health factor
-  healthFactorDanger: number; // Below this → REPAY_DEBT (default: 1.3)
-  healthFactorTarget: number; // Repay until reaching this (default: 1.8)
-
-  // Volatility
-  highVolatilityThreshold: number; // Above this → conservative (default: 80% annualized)
-
-  // Yield
-  minYieldDifferential: number; // Min APY improvement to rebalance (default: 2%)
+  bearishThreshold: number;
+  bullishThreshold: number;
+  confidenceMinimum: number;
+  healthFactorDanger: number;
+  healthFactorTarget: number;
+  highVolatilityThreshold: number;
+  minYieldDifferential: number;
 }
 
 const DEFAULT_STRATEGY: StrategyConfig = {
@@ -115,9 +126,6 @@ const DEFAULT_STRATEGY: StrategyConfig = {
 
 // ── Portfolio Reader ───────────────────────────────────────
 
-/**
- * Read user's current Bonzo positions via the Data API
- */
 export async function getPortfolio(
   accountId: string
 ): Promise<PortfolioSummary> {
@@ -157,11 +165,8 @@ export async function getPortfolio(
   };
 }
 
-// ── Decision Engine ────────────────────────────────────────
+// ── Decision Engine (legacy, kept for backward compat) ─────
 
-/**
- * Core strategy: analyze all data and produce a decision
- */
 export function makeDecision(
   sentiment: SentimentResult,
   portfolio: PortfolioSummary | null,
@@ -170,17 +175,13 @@ export function makeDecision(
 ): KeeperDecision {
   const now = new Date().toISOString();
 
-  // ──────────────────────────────────────────
-  // STRATEGY 1: Health Factor Emergency
-  // Highest priority — prevent liquidation
-  // ──────────────────────────────────────────
+  // Health Factor Emergency
   if (
     portfolio &&
     portfolio.healthFactor > 0 &&
     portfolio.healthFactor < config.healthFactorDanger &&
     portfolio.totalBorrowedUSD > 0
   ) {
-    // Find the largest borrowed position to repay
     const largestDebt = [...portfolio.positions]
       .filter((p) => p.borrowed > 0)
       .sort((a, b) => b.borrowedUSD - a.borrowedUSD)[0];
@@ -189,9 +190,7 @@ export function makeDecision(
       action: "REPAY_DEBT",
       reason: `Health factor critically low at ${portfolio.healthFactor.toFixed(
         2
-      )} (danger < ${config.healthFactorDanger}). Repaying ${
-        largestDebt?.symbol || "debt"
-      } to avoid liquidation.`,
+      )}. Repaying ${largestDebt?.symbol || "debt"} to avoid liquidation.`,
       confidence: 0.95,
       params: {
         tokenSymbol: largestDebt?.symbol,
@@ -202,92 +201,67 @@ export function makeDecision(
     };
   }
 
-  // ──────────────────────────────────────────
-  // STRATEGY 2: Bearish Sentiment Harvesting
-  // If market looks bad → protect value
-  // ──────────────────────────────────────────
+  // Bearish
   if (
     sentiment.score < config.bearishThreshold &&
     sentiment.confidence >= config.confidenceMinimum
   ) {
-    // Check if user has non-stable positions to protect
     const volatilePositions = portfolio?.positions.filter(
       (p) => p.supplied > 0 && !["USDC", "USDT", "DAI"].includes(p.symbol)
     );
-
     if (volatilePositions && volatilePositions.length > 0) {
       const largest = volatilePositions.sort(
         (a, b) => b.suppliedUSD - a.suppliedUSD
       )[0];
-
       return {
         action: "HARVEST",
-        reason: `Bearish sentiment detected (score: ${sentiment.score}, signal: ${sentiment.signal}). ${sentiment.reasoning}. Withdrawing ${largest.symbol} and converting to USDC to protect value.`,
+        reason: `Bearish sentiment (score: ${sentiment.score}). Withdrawing ${largest.symbol} to protect value.`,
         confidence: sentiment.confidence,
-        params: {
-          tokenSymbol: largest.symbol,
-          targetAsset: "USDC",
-        },
+        params: { tokenSymbol: largest.symbol, targetAsset: "USDC" },
         timestamp: now,
       };
     }
-
-    // No volatile positions — just signal awareness
     return {
       action: "HOLD",
-      reason: `Bearish sentiment (score: ${sentiment.score}) but no volatile positions to protect. Staying in stables.`,
+      reason: `Bearish sentiment (${sentiment.score}) but no volatile positions. Staying in stables.`,
       confidence: sentiment.confidence,
       timestamp: now,
     };
   }
 
-  // ──────────────────────────────────────────
-  // STRATEGY 3: Volatility-Aware Rebalancing
-  // High volatility → stay conservative
-  // ──────────────────────────────────────────
+  // High Volatility
   if (sentiment.dataPoints.volatility > config.highVolatilityThreshold) {
-    // If user has positions, check if rebalancing helps
     if (portfolio && portfolio.positions.length > 0) {
       return {
         action: "HOLD",
-        reason: `High volatility detected (${sentiment.dataPoints.volatility.toFixed(
+        reason: `High volatility (${sentiment.dataPoints.volatility.toFixed(
           0
-        )}% annualized, threshold: ${
-          config.highVolatilityThreshold
-        }%). Holding current positions until volatility subsides.`,
+        )}%). Holding until it subsides.`,
         confidence: 0.7,
         timestamp: now,
       };
     }
   }
 
-  // ──────────────────────────────────────────
-  // STRATEGY 4: Yield Optimization
-  // Check if better yields are available
-  // ──────────────────────────────────────────
+  // Yield Optimization
   if (portfolio && portfolio.positions.length > 0) {
     const activeMarkets = markets.filter((m) => m.active && !m.frozen);
-
     for (const pos of portfolio.positions) {
       if (pos.supplied > 0) {
-        // Find if there's a significantly better yield
         const betterYield = activeMarkets.find(
           (m) =>
             m.symbol !== pos.symbol &&
             m.supplyAPY > pos.supplyAPY + config.minYieldDifferential &&
-            m.utilizationRate < 90 // Don't chase illiquid pools
+            m.utilizationRate < 90
         );
-
         if (betterYield) {
           return {
             action: "REBALANCE",
             reason: `${
               betterYield.symbol
-            } offers ${betterYield.supplyAPY.toFixed(2)}% supply APY vs your ${
+            } offers ${betterYield.supplyAPY.toFixed(2)}% vs ${
               pos.symbol
-            } at ${pos.supplyAPY.toFixed(2)}% (+${(
-              betterYield.supplyAPY - pos.supplyAPY
-            ).toFixed(2)}% improvement). Rebalancing recommended.`,
+            } at ${pos.supplyAPY.toFixed(2)}%.`,
             confidence: 0.7,
             params: {
               tokenSymbol: pos.symbol,
@@ -300,59 +274,43 @@ export function makeDecision(
     }
   }
 
-  // ──────────────────────────────────────────
-  // STRATEGY 5: Bullish Accumulation
-  // Strong bullish + low volatility → increase
-  // ──────────────────────────────────────────
+  // Bullish
   if (
     sentiment.score > config.bullishThreshold &&
     sentiment.confidence >= config.confidenceMinimum &&
     sentiment.dataPoints.volatility < config.highVolatilityThreshold
   ) {
-    // Find the best yield opportunity
     const bestYield = markets
       .filter((m) => m.active && !m.frozen && m.supplyAPY > 0)
       .sort((a, b) => b.supplyAPY - a.supplyAPY)[0];
-
     if (bestYield) {
       return {
         action: "INCREASE_POSITION",
-        reason: `Strong bullish sentiment (score: ${
+        reason: `Bullish sentiment (${
           sentiment.score
-        }) with manageable volatility (${sentiment.dataPoints.volatility.toFixed(
-          0
-        )}%). Best yield: ${bestYield.symbol} at ${bestYield.supplyAPY.toFixed(
-          2
-        )}% APY.`,
+        }) with low volatility. Best yield: ${
+          bestYield.symbol
+        } at ${bestYield.supplyAPY.toFixed(2)}%.`,
         confidence: sentiment.confidence,
-        params: {
-          tokenSymbol: bestYield.symbol,
-        },
+        params: { tokenSymbol: bestYield.symbol },
         timestamp: now,
       };
     }
   }
 
-  // ──────────────────────────────────────────
-  // DEFAULT: Hold and monitor
-  // ──────────────────────────────────────────
-  const volatilityStr = sentiment.dataPoints.volatility
-    ? `${sentiment.dataPoints.volatility.toFixed(0)}%`
-    : "N/A";
-
+  // Default
   return {
     action: "HOLD",
-    reason: `Market conditions stable. Sentiment: ${sentiment.score} (${sentiment.signal}), Volatility: ${volatilityStr}. No action needed.`,
+    reason: `Market stable. Sentiment: ${sentiment.score}, Volatility: ${
+      sentiment.dataPoints.volatility?.toFixed(0) || "N/A"
+    }%. No action needed.`,
     confidence: 0.5,
     timestamp: now,
   };
 }
 
-// ── Action Executor ────────────────────────────────────────
+// ── Action Executor (legacy) ────────────────────────────────
 
-/**
- * Execute a keeper decision through the LangGraph agent
- */
 export async function executeDecision(
   decision: KeeperDecision,
   threadId: string = "keeper"
@@ -367,44 +325,34 @@ export async function executeDecision(
   }
 
   let prompt: string;
-
   switch (decision.action) {
     case "HARVEST":
       prompt = `KEEPER ACTION: Withdraw my supplied ${
         decision.params?.tokenSymbol || "tokens"
-      } from Bonzo Finance. This is an automated keeper action triggered because: ${
-        decision.reason
-      }`;
+      } from Bonzo Finance. Reason: ${decision.reason}`;
       break;
-
     case "REPAY_DEBT":
       prompt = `KEEPER ACTION: Repay ${
         decision.params?.amount || "some"
-      } of my ${
-        decision.params?.tokenSymbol || ""
-      } debt on Bonzo Finance. My health factor is ${
+      } of my ${decision.params?.tokenSymbol || ""} debt. Health factor: ${
         decision.params?.healthFactor?.toFixed(2) || "low"
-      }. This is an automated keeper action to prevent liquidation.`;
+      }.`;
       break;
-
     case "REBALANCE":
-      prompt = `KEEPER ACTION: I want to rebalance. First, check my current positions on Bonzo, then tell me the optimal move. Current position in ${
+      prompt = `KEEPER ACTION: Rebalance from ${
         decision.params?.tokenSymbol || "unknown"
-      }, considering moving to ${
-        decision.params?.targetAsset || "better yield"
-      }. Reason: ${decision.reason}`;
+      } to ${decision.params?.targetAsset || "better yield"}. Reason: ${
+        decision.reason
+      }`;
       break;
-
     case "INCREASE_POSITION":
-      prompt = `KEEPER ACTION: Check my HBAR balance, then tell me if I should deposit into ${
-        decision.params?.tokenSymbol || "the best yield opportunity"
-      } on Bonzo Finance. Reason: ${decision.reason}`;
+      prompt = `KEEPER ACTION: Check balance, then deposit into ${
+        decision.params?.tokenSymbol || "best yield"
+      } on Bonzo. Reason: ${decision.reason}`;
       break;
-
     case "EXIT_TO_STABLE":
-      prompt = `KEEPER ACTION: Emergency exit. Withdraw all non-stable positions from Bonzo Finance. Reason: ${decision.reason}`;
+      prompt = `KEEPER ACTION: Emergency exit. Withdraw all non-stable positions. Reason: ${decision.reason}`;
       break;
-
     default:
       return { executed: false, error: `Unknown action: ${decision.action}` };
   }
@@ -417,84 +365,157 @@ export async function executeDecision(
       toolCalls: result.toolCalls,
     };
   } catch (error: any) {
-    return {
-      executed: false,
-      error: error.message,
-    };
+    return { executed: false, error: error.message };
   }
 }
 
-// ── HCS Logger ─────────────────────────────────────────────
+// ── Full Keeper Cycle (Multi-Agent Powered) ────────────────
 
 /**
- * Log a keeper decision to HCS for immutable audit trail
- */
-async function logToHCS(
-  decision: KeeperDecision,
-  sentiment: SentimentResult,
-  portfolio: PortfolioSummary | null
-): Promise<{
-  logged: boolean;
-  topicId?: string;
-  sequenceNumber?: number;
-  error?: string;
-}> {
-  try {
-    const topicId = await ensureAuditTopic();
-
-    const log: AgentDecisionLog = {
-      timestamp: decision.timestamp,
-      agent: "VaultMind",
-      version: "1.0.0",
-      action: decision.action,
-      reason: decision.reason,
-      confidence: decision.confidence,
-      context: {
-        sentimentScore: sentiment.score,
-        sentimentSignal: sentiment.signal,
-        volatility: sentiment.dataPoints.volatility,
-        fearGreedIndex: sentiment.dataPoints.fearGreedValue,
-        hbarPrice: sentiment.dataPoints.hbarPrice,
-        hbarChange24h: sentiment.dataPoints.hbarChange24h,
-      },
-      params: decision.params,
-    };
-
-    const result = await logDecisionToHCS(topicId, log);
-    return {
-      logged: true,
-      topicId,
-      sequenceNumber: result.sequenceNumber,
-    };
-  } catch (error: any) {
-    console.error("[Keeper] HCS logging failed:", error.message);
-    return { logged: false, error: error.message };
-  }
-}
-
-// ── Full Keeper Cycle ──────────────────────────────────────
-
-/**
- * Run one complete keeper cycle:
- * 1. Gather market data + sentiment
- * 2. Read user positions (if account configured)
- * 3. Make decision
- * 4. Execute (if not HOLD)
- * 5. Log to HCS
+ * Run one complete keeper cycle using the multi-agent architecture.
+ * Also automatically runs DCA tick to execute any due plans.
+ *
+ * Pipeline: Sentinel → Strategist → Auditor → Executor → Auditor
  */
 export async function runKeeperCycle(
   config: StrategyConfig = DEFAULT_STRATEGY,
-  executeActions: boolean = false // Safety: default to dry-run
+  executeActions: boolean = false
 ): Promise<KeeperCycleResult> {
   const startTime = Date.now();
   const accountId = process.env.HEDERA_ACCOUNT_ID;
 
   console.log("[Keeper] ═══════════════════════════════════════");
-  console.log("[Keeper] Starting keeper cycle...");
+  console.log("[Keeper] Starting multi-agent keeper cycle...");
   console.log(`[Keeper] Account: ${accountId}`);
   console.log(`[Keeper] Execute mode: ${executeActions ? "LIVE" : "DRY-RUN"}`);
 
-  // ── Step 1: Gather data in parallel ──
+  try {
+    // Run the full multi-agent cycle
+    const multiResult = await runMultiAgentCycle(config, executeActions);
+
+    // Also run DCA tick if execution is enabled
+    let dcaCount = multiResult.dcaExecutions;
+    if (executeActions) {
+      const dcaTick = await runDCATick();
+      dcaCount += dcaTick.executed;
+    }
+
+    // Map multi-agent result to legacy KeeperCycleResult format
+    const topAction = multiResult.strategy.actions[0];
+    const actionMap: Record<string, KeeperAction> = {
+      LEND_DEPOSIT: "INCREASE_POSITION",
+      LEND_WITHDRAW: "HARVEST",
+      LEND_BORROW: "INCREASE_POSITION",
+      LEND_REPAY: "REPAY_DEBT",
+      VAULT_DEPOSIT: "INCREASE_POSITION",
+      VAULT_WITHDRAW: "HARVEST",
+      VAULT_HARVEST: "HARVEST",
+      VAULT_SWITCH: "REBALANCE",
+      STADER_STAKE: "INCREASE_POSITION",
+      STADER_STRATEGY: "INCREASE_POSITION",
+      DCA_EXECUTE: "INCREASE_POSITION",
+      DCA_PAUSE: "HOLD",
+      HOLD: "HOLD",
+      EMERGENCY_EXIT: "EXIT_TO_STABLE",
+    };
+
+    const decision: KeeperDecision = {
+      action: actionMap[topAction?.type || "HOLD"] || "HOLD",
+      reason: topAction?.reasoning || "No action needed",
+      confidence: topAction?.confidence || 0.5,
+      params: topAction?.params,
+      timestamp: multiResult.timestamp,
+    };
+
+    const sentiment = multiResult.intel.sentiment || {
+      score: 0,
+      signal: "HOLD" as const,
+      confidence: 0,
+      reasoning: "Sentiment unavailable",
+      dataPoints: {
+        hbarPrice: multiResult.intel.prices.hbar,
+        hbarChange24h: 0,
+        fearGreedIndex: 50,
+        fearGreedValue: 50,
+        fearGreedLabel: "Neutral",
+        volatility: 40,
+        volatilityTrend: "stable",
+        newsCount: 0,
+        btcDominance: 0,
+      },
+    };
+
+    // Extract vault decision from strategy
+    const vaultAction = multiResult.strategy.actions.find((a) =>
+      a.type.startsWith("VAULT_")
+    );
+    const vaultDecision = vaultAction
+      ? {
+          vaultId: vaultAction.params.vaultId,
+          action: vaultAction.type.replace("VAULT_", ""),
+          reason: vaultAction.reasoning,
+          confidence: vaultAction.confidence * 100,
+        }
+      : null;
+
+    // HCS log status
+    const hcsEntry = multiResult.auditEntries.find(
+      (e) => e.phase === "decision"
+    );
+    const hcsLog = hcsEntry?.hcsLog || { logged: false, error: "Not logged" };
+
+    // Execution status
+    const execReport = multiResult.executions[0];
+    const execution = execReport
+      ? {
+          executed: execReport.result.success,
+          agentResponse: execReport.result.details,
+          toolCalls: execReport.result.toolsUsed.map((t) => ({
+            tool: t,
+            input: "",
+            output: "",
+          })),
+          error: execReport.result.error,
+        }
+      : {
+          executed: false,
+          agentResponse: executeActions
+            ? "No actions to execute"
+            : `[DRY RUN] Would execute: ${decision.action}`,
+        };
+
+    return {
+      decision,
+      sentiment,
+      portfolio: multiResult.portfolio,
+      markets: multiResult.intel.lendMarkets,
+      execution,
+      hcsLog,
+      vaultDecision,
+      dcaExecutions: dcaCount,
+      agentsUsed: multiResult.agentsUsed,
+      multiAgentResult: multiResult,
+      timestamp: multiResult.timestamp,
+      durationMs: Date.now() - startTime,
+    };
+  } catch (error: any) {
+    console.error(`[Keeper] Multi-agent cycle failed: ${error.message}`);
+
+    // Fallback: run legacy single-agent cycle
+    console.log("[Keeper] Falling back to legacy single-agent cycle...");
+    return runLegacyKeeperCycle(config, executeActions, startTime);
+  }
+}
+
+// ── Legacy fallback (in case multi-agent pipeline fails) ───
+
+async function runLegacyKeeperCycle(
+  config: StrategyConfig,
+  executeActions: boolean,
+  startTime: number
+): Promise<KeeperCycleResult> {
+  const accountId = process.env.HEDERA_ACCOUNT_ID;
+
   const [sentimentResult, marketsResult, portfolioResult] =
     await Promise.allSettled([
       analyzeSentiment(),
@@ -510,104 +531,75 @@ export async function runKeeperCycle(
     portfolioResult.status === "fulfilled" ? portfolioResult.value : null;
 
   if (!sentiment) {
-    console.error("[Keeper] Sentiment analysis failed — cannot make decision");
-    const fallbackDecision: KeeperDecision = {
-      action: "HOLD",
-      reason: "Sentiment analysis unavailable. Holding until data is restored.",
-      confidence: 0,
-      timestamp: new Date().toISOString(),
-    };
     return {
-      decision: fallbackDecision,
+      decision: {
+        action: "HOLD",
+        reason: "Sentiment analysis unavailable.",
+        confidence: 0,
+        timestamp: new Date().toISOString(),
+      },
       sentiment: {
         score: 0,
         signal: "HOLD",
         confidence: 0,
-        reasoning: "Sentiment unavailable",
+        reasoning: "Unavailable",
         dataPoints: {} as any,
       },
       portfolio,
       markets,
       execution: { executed: false, error: "No sentiment data" },
-      hcsLog: { logged: false, error: "Skipped — no decision made" },
+      hcsLog: { logged: false, error: "Skipped" },
+      agentsUsed: ["legacy"],
       timestamp: new Date().toISOString(),
       durationMs: Date.now() - startTime,
     };
   }
 
-  // Log data summary
-  console.log(`[Keeper] Sentiment: ${sentiment.score} (${sentiment.signal})`);
-  console.log(
-    `[Keeper] Volatility: ${
-      sentiment.dataPoints.volatility?.toFixed(0) || "N/A"
-    }%`
-  );
-  console.log(
-    `[Keeper] HBAR: $${
-      sentiment.dataPoints.hbarPrice
-    } (${sentiment.dataPoints.hbarChange24h?.toFixed(2)}%)`
-  );
-  if (portfolio) {
-    console.log(
-      `[Keeper] Portfolio: $${portfolio.totalSuppliedUSD.toFixed(
-        2
-      )} supplied, $${portfolio.totalBorrowedUSD.toFixed(2)} borrowed`
-    );
-    console.log(`[Keeper] Health factor: ${portfolio.healthFactor}`);
-    console.log(
-      `[Keeper] Positions: ${
-        portfolio.positions.map((p) => p.symbol).join(", ") || "none"
-      }`
-    );
-  } else {
-    console.log(
-      "[Keeper] No portfolio data (account may have no Bonzo positions)"
-    );
-  }
-
-  // ── Step 2: Make decision ──
   const decision = makeDecision(sentiment, portfolio, markets, config);
-  console.log(
-    `[Keeper] Decision: ${decision.action} (confidence: ${decision.confidence})`
-  );
-  console.log(`[Keeper] Reason: ${decision.reason}`);
 
-  // ── Step 3: Execute (if enabled and not HOLD) ──
-  let execution: KeeperCycleResult["execution"] = {
-    executed: false,
-  };
-
+  let execution: KeeperCycleResult["execution"] = { executed: false };
   if (executeActions && decision.action !== "HOLD") {
-    console.log(`[Keeper] Executing ${decision.action}...`);
     execution = await executeDecision(decision);
-    if (execution.executed) {
-      console.log(
-        `[Keeper] ✅ Executed. Tools used: ${execution.toolCalls?.length || 0}`
-      );
-    } else {
-      console.log(`[Keeper] ⚠️ Execution failed: ${execution.error}`);
-    }
   } else if (!executeActions && decision.action !== "HOLD") {
     execution = {
       executed: false,
-      agentResponse: `[DRY RUN] Would execute: ${decision.action}. Enable execution to perform this action.`,
+      agentResponse: `[DRY RUN] Would execute: ${decision.action}`,
     };
-    console.log(`[Keeper] [DRY RUN] Would execute: ${decision.action}`);
   }
 
-  // ── Step 4: Log to HCS ──
-  const hcsLog = await logToHCS(decision, sentiment, portfolio);
-  if (hcsLog.logged) {
-    console.log(
-      `[Keeper] ✅ Logged to HCS: topic ${hcsLog.topicId}, seq ${hcsLog.sequenceNumber}`
-    );
-  } else {
-    console.log(`[Keeper] ⚠️ HCS log failed: ${hcsLog.error}`);
+  // Also run DCA tick
+  if (executeActions) {
+    try {
+      await runDCATick();
+    } catch {}
   }
 
-  const durationMs = Date.now() - startTime;
-  console.log(`[Keeper] Cycle complete in ${durationMs}ms`);
-  console.log("[Keeper] ═══════════════════════════════════════");
+  // HCS log
+  let hcsLog: KeeperCycleResult["hcsLog"] = { logged: false };
+  try {
+    const topicId = await ensureAuditTopic();
+    const log: AgentDecisionLog = {
+      timestamp: decision.timestamp,
+      agent: "VaultMind",
+      version: "2.0.0",
+      action: decision.action,
+      reason: decision.reason,
+      confidence: decision.confidence,
+      context: {
+        sentimentScore: sentiment.score,
+        sentimentSignal: sentiment.signal,
+        volatility: sentiment.dataPoints.volatility,
+        fearGreedIndex: sentiment.dataPoints.fearGreedValue,
+        hbarPrice: sentiment.dataPoints.hbarPrice,
+        hbarChange24h: sentiment.dataPoints.hbarChange24h,
+      },
+      params: decision.params,
+    };
+    const result = await logDecisionToHCS(topicId, log);
+    hcsLog = { logged: true, topicId, sequenceNumber: result.sequenceNumber };
+  } catch (err: any) {
+    hcsLog = { logged: false, error: err.message };
+  }
 
   return {
     decision,
@@ -616,14 +608,13 @@ export async function runKeeperCycle(
     markets,
     execution,
     hcsLog,
+    agentsUsed: ["legacy"],
     timestamp: new Date().toISOString(),
-    durationMs,
+    durationMs: Date.now() - startTime,
   };
 }
 
-// ── Vault Keeper Extension ──────────────────────────────────
-// Re-export vault decision making from bonzo-vaults for unified keeper access
-
+// Re-export vault types for API compatibility
 export {
   makeVaultDecision,
   getVaultsWithLiveData,

@@ -6,7 +6,14 @@ import {
   getVaultsSummary,
   type VaultKeeperContext,
 } from "@/lib/bonzo-vaults";
+import {
+  executeVaultDeposit,
+  executeVaultWithdraw,
+  executeVaultHarvest,
+  queryVaultData,
+} from "@/lib/vault-execute";
 import { analyzeSentiment } from "@/lib/sentiment";
+import { getHbarPrice } from "@/lib/pyth";
 
 export const dynamic = "force-dynamic";
 
@@ -14,9 +21,9 @@ export const dynamic = "force-dynamic";
  * GET /api/vaults
  *
  * Query params:
- *   ?action=list|compare|decide|summary
+ *   ?action=list|compare|decide|summary|query
  *   ?goal=safe-yield|max-yield|balanced  (for compare)
- *   ?execute=true (for decide — triggers harvest/deposit)
+ *   ?vaultId=xxx (for query — gets real on-chain data)
  */
 export async function GET(req: NextRequest) {
   const sp = req.nextUrl.searchParams;
@@ -43,8 +50,31 @@ export async function GET(req: NextRequest) {
         });
       }
 
+      case "query": {
+        const vaultId = sp.get("vaultId");
+        if (!vaultId) {
+          return NextResponse.json(
+            { success: false, error: "vaultId required" },
+            { status: 400 }
+          );
+        }
+        const liveData = await queryVaultData(vaultId);
+        if (!liveData) {
+          return NextResponse.json(
+            {
+              success: false,
+              error: `Vault not found or query failed: ${vaultId}`,
+            },
+            { status: 404 }
+          );
+        }
+        return NextResponse.json({
+          success: true,
+          data: { vaultId, liveData },
+        });
+      }
+
       case "compare": {
-        // Get sentiment for context-aware comparison
         let sentimentScore = 0;
         let volatility = 40;
         try {
@@ -71,7 +101,6 @@ export async function GET(req: NextRequest) {
       }
 
       case "decide": {
-        // Full keeper decision with market context
         let sentimentScore = 0;
         let volatility = 40;
         let hbarPrice = 0.2;
@@ -81,8 +110,13 @@ export async function GET(req: NextRequest) {
           const sentiment = await analyzeSentiment();
           sentimentScore = sentiment.score;
           volatility = sentiment.dataPoints.volatility;
-          hbarPrice = sentiment.dataPoints.hbarPrice;
           fearGreedIndex = sentiment.dataPoints.fearGreedValue;
+        } catch {}
+
+        // Get real HBAR price from Pyth
+        try {
+          const pythPrice = await getHbarPrice();
+          if (pythPrice.price > 0) hbarPrice = pythPrice.price;
         } catch {}
 
         const ctx: VaultKeeperContext = {
@@ -91,7 +125,7 @@ export async function GET(req: NextRequest) {
           volatility,
           hbarPrice,
           fearGreedIndex,
-          userHbarBalance: 1000, // Default; real value from wallet
+          userHbarBalance: 1000,
           userPositions: [],
         };
 
@@ -105,6 +139,7 @@ export async function GET(req: NextRequest) {
               sentimentScore,
               volatility,
               hbarPrice,
+              hbarPriceSource: "pyth",
               fearGreedIndex,
             },
             vaultState: vaults.find((v) => v.id === decision.vaultId),
@@ -138,106 +173,71 @@ export async function GET(req: NextRequest) {
 /**
  * POST /api/vaults
  *
- * Body: { action: "harvest" | "deposit" | "withdraw", vaultId: string, amount?: number }
- * Executes vault operations via the keeper
+ * Body: { action: "harvest"|"deposit"|"withdraw", vaultId: string, amount?: number }
+ *
+ * On mainnet: Executes REAL on-chain vault transactions.
+ * On testnet: Returns error (vault contracts are mainnet-only).
  */
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const { action, vaultId, amount } = body;
 
-    const vaults = await getVaultsWithLiveData();
-    const vault = vaults.find((v) => v.id === vaultId);
-
-    if (!vault) {
+    if (!vaultId) {
       return NextResponse.json(
-        { success: false, error: `Vault not found: ${vaultId}` },
-        { status: 404 }
+        { success: false, error: "vaultId required" },
+        { status: 400 }
       );
     }
 
-    // In a production system, these would call the actual vault contracts
-    // via Hedera Agent Kit's EVM contract call functionality.
-    // For the hackathon demo, we return the transaction details that WOULD be sent.
-
     switch (action) {
       case "harvest": {
+        const result = await executeVaultHarvest(vaultId);
         return NextResponse.json({
-          success: true,
+          success: result.success,
           data: {
             action: "harvest",
-            vault: vault.name,
-            strategyAddress: vault.strategyAddress,
-            functionSignature: "harvest()",
-            calldata: "0x4641257d",
-            description: `Harvesting accumulated rewards from ${vault.name} strategy. Rewards will be auto-compounded back into the vault position.`,
-            estimatedGas: "0.0025 HBAR",
-            note: "Harvest caller receives 0.05-0.5% of harvested rewards as incentive.",
+            vault: result.vaultName,
+            txIds: result.txIds,
+            hashScanLinks: result.hashScanLinks,
+            details: result.details,
+            toolsUsed: result.toolsUsed,
           },
+          error: result.error,
         });
       }
 
       case "deposit": {
         const depositAmount = amount || 100;
+        const result = await executeVaultDeposit(vaultId, depositAmount);
         return NextResponse.json({
-          success: true,
+          success: result.success,
           data: {
             action: "deposit",
-            vault: vault.name,
-            vaultAddress: vault.vaultAddress,
+            vault: result.vaultName,
             amount: depositAmount,
-            wantToken: vault.wantToken,
-            steps: [
-              {
-                step: 1,
-                action: `Approve ${vault.name} vault to spend ${depositAmount} ${vault.wantToken}`,
-                contract: vault.wantTokenId,
-                function: "approve(address,uint256)",
-              },
-              {
-                step: 2,
-                action: `Deposit ${depositAmount} ${vault.wantToken} into vault`,
-                contract: vault.vaultAddress,
-                function: "deposit(uint256)",
-              },
-            ],
-            expectedShares: `~${(
-              depositAmount / (vault.pricePerShare || 1)
-            ).toFixed(4)} ${vault.symbol}`,
-            estimatedAPY: `${vault.apy?.toFixed(1)}%`,
-            description: `Depositing ${depositAmount} ${vault.wantToken} into ${
-              vault.name
-            }. You will receive ${
-              vault.symbol
-            } vault tokens representing your share. ${
-              vault.harvestOnDeposit
-                ? "Note: This deposit will also trigger a harvest, compounding rewards for all depositors."
-                : ""
-            }`,
+            txIds: result.txIds,
+            hashScanLinks: result.hashScanLinks,
+            details: result.details,
+            toolsUsed: result.toolsUsed,
           },
+          error: result.error,
         });
       }
 
       case "withdraw": {
-        const withdrawAmount = amount || 100;
+        const result = await executeVaultWithdraw(vaultId, amount);
         return NextResponse.json({
-          success: true,
+          success: result.success,
           data: {
             action: "withdraw",
-            vault: vault.name,
-            vaultAddress: vault.vaultAddress,
-            amount: withdrawAmount,
-            wantToken: vault.wantToken,
-            function: amount ? "withdraw(uint256)" : "withdrawAll()",
-            calldata: amount ? "0x2e1a7d4d..." : "0x853828b6",
-            description: `Withdrawing from ${vault.name}. You will receive ${
-              vault.wantToken
-            } tokens proportional to your vault share. ${
-              vault.strategy === "single-asset-dex"
-                ? "Note: You may receive a mix of both underlying tokens from the liquidity position."
-                : ""
-            }`,
+            vault: result.vaultName,
+            txIds: result.txIds,
+            hashScanLinks: result.hashScanLinks,
+            details: result.details,
+            toolsUsed: result.toolsUsed,
           },
+          error: result.error,
         });
       }
 

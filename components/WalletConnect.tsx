@@ -34,16 +34,24 @@ export interface WalletData {
 // ── Known token map ──
 
 const KNOWN_TOKENS: Record<string, { symbol: string; decimals: number }> = {
-  "0.0.731861": { symbol: "SAUCE", decimals: 6 },
-  "0.0.456858": { symbol: "USDC", decimals: 6 },
-  "0.0.1460200": { symbol: "XSAUCE", decimals: 6 },
-  "0.0.786931": { symbol: "HBARX", decimals: 8 },
-  "0.0.1055483": { symbol: "PACK", decimals: 6 },
-  "0.0.2099737": { symbol: "KARATE", decimals: 8 },
-  "0.0.4711213": { symbol: "WHBAR", decimals: 8 },
-  "0.0.6247396": { symbol: "bHBAR", decimals: 8 },
-  "0.0.3408830": { symbol: "DOVU", decimals: 8 },
-  "0.0.1159076": { symbol: "HST", decimals: 8 },
+  // Mainnet
+  "0.0.731861":  { symbol: "SAUCE", decimals: 6 },
+  "0.0.456858":  { symbol: "USDC", decimals: 6 },
+  "0.0.1460200": { symbol: "XSAUCE", decimals: 8 },
+  "0.0.834116":  { symbol: "HBARX", decimals: 8 },
+  "0.0.2283230": { symbol: "KARATE", decimals: 8 },
+  "0.0.1456986": { symbol: "WHBAR", decimals: 8 },
+  "0.0.4794920": { symbol: "PACK", decimals: 8 },
+  "0.0.3716059": { symbol: "DOVU", decimals: 8 },
+  "0.0.968069":  { symbol: "HST", decimals: 8 },
+  // Testnet — these were missing, causing 100x errors
+  "0.0.1183558": { symbol: "SAUCE", decimals: 6 },
+  "0.0.5449":    { symbol: "USDC", decimals: 6 },
+  "0.0.3772909": { symbol: "KARATE", decimals: 8 },
+  "0.0.1418651": { symbol: "XSAUCE", decimals: 8 },
+  "0.0.2233069": { symbol: "HBARX", decimals: 8 },
+  "0.0.2231533": { symbol: "HBARX", decimals: 8 },
+  "0.0.15058":   { symbol: "WHBAR", decimals: 8 },
 };
 
 // ── Mirror Node ──

@@ -179,16 +179,17 @@ export default function Home() {
       id: "welcome",
       role: "assistant",
       content:
-        "Welcome to **VaultMind** — your AI DeFi Keeper on Hedera. Every feature is controllable from this chat.\n\n" +
-        "**📊 Analytics**\n• \"Show my portfolio\" — pie chart\n• \"How's the market sentiment?\" — Fear & Greed\n• \"Compare APYs across platforms\" — Bonzo vs SaucerSwap\n• \"Show Bonzo Vault APYs\" — vault comparison\n• \"Show my positions\" — Bonzo Lend health factor\n• \"Show Bonzo markets\" — all reserves + rates\n• \"Show risk vs return\" / \"Show DeFi opportunities\" / \"Show correlation matrix\"\n\n" +
-        "**⚡ Keeper Engine**\n• \"Run dry run\" — analyze without executing\n• \"Execute keeper\" — confirm + execute\n• \"Start auto keeper\" / \"Stop auto keeper\"\n• \"Show decision history\" — past actions\n• \"Show audit log\" — HCS on-chain trail\n• \"Show last 5 DEPOSIT actions\" — filtered audit\n• \"Show first 3 entries\" — oldest first\n• \"Show only BORROW actions\" — type filter\n\n" +
+        "Welcome to **VaultMind** — your Multi-Agent AI DeFi Keeper on Hedera.\n\n" +
+        "Powered by 4 specialized agents (Sentinel → Strategist → Auditor → Executor) with real-time Pyth oracle prices.\n\n" +
+        "**📊 Analytics**\n• \"Show my portfolio\" — pie chart\n• \"How's the market sentiment?\" — Fear & Greed + Pyth prices\n• \"Compare APYs across platforms\" — Bonzo vs SaucerSwap\n• \"Show Bonzo Vault APYs\" — 20 vault comparison\n• \"Show my positions\" — Bonzo Lend health factor\n• \"Show Bonzo markets\" — all reserves + rates\n• \"Show risk vs return\" / \"Show DeFi opportunities\" / \"Show correlation matrix\"\n\n" +
+        "**⚡ Keeper Engine**\n• \"Run dry run\" — multi-agent analysis without executing\n• \"Execute keeper\" — confirm + execute via Executor Agent\n• \"Start auto keeper\" / \"Stop auto keeper\" — DCA auto-executes too\n• \"Show decision history\" — past actions\n• \"Show audit log\" — HCS on-chain trail (multi-agent metadata)\n• \"Show last 5 DEPOSIT actions\" — filtered audit\n• \"Show first 3 entries\" — oldest first\n• \"Show only BORROW actions\" — type filter\n\n" +
         "**⚙️ Strategy Config**\n• \"Show strategy config\" — current parameters\n• \"Set bearish threshold to -25\" — adjust risk\n• \"Set confidence minimum to 70\" — require higher confidence\n• \"Set volatility exit to 75\" — tighten exit\n• \"Reset strategy to defaults\"\n\n" +
-        "**💰 Vault Actions**\n• \"Deposit 100 HBAR into HBAR-USDC vault\"\n• \"Withdraw from USDC-USDT vault\"\n• \"Harvest SAUCE-HBAR vault now\"\n• \"Switch vault to stable\"\n\n" +
+        "**💰 Vault Actions (Real mainnet contracts)**\n• \"Deposit 100 HBAR into HBAR-USDC vault\"\n• \"Withdraw from USDC-USDT vault\"\n• \"Harvest SAUCE-HBAR vault now\" — earns caller fee\n• \"Switch vault to stable\"\n\n" +
         "**🏦 Lending Actions**\n• \"Supply 500 HBAR to Bonzo\"\n• \"Borrow 200 USDC\"\n• \"Repay my USDC loan\"\n\n" +
         "**👛 Wallet**\n• \"Connect wallet 0.0.XXXXX\" / \"Disconnect wallet\"\n• \"Show my wallet\" — balance & tokens\n\n" +
-        "**📈 Research**\n• \"Show backtest\" — VaultMind vs HODL\n• \"Show price chart\" — OHLCV candlestick\n\n" +
-        "**📅 DCA (Dollar Cost Averaging)**\n• \"DCA 50 HBAR daily\" — set up recurring deposits\n• \"DCA 100 USDC weekly\" — weekly accumulation\n• \"Show DCA status\" / \"Cancel DCA\"\n• \"Pause DCA\" / \"Resume DCA\"\n\n" +
-        "**🔷 Stader HBARX Strategy**\n• \"HBARX strategy with 100 HBAR\" — full stake→supply loop\n• \"Stake 50 HBAR with Stader\" — liquid staking only\n• \"Show HBARX info\" — exchange rate & APY\n\n" +
+        "**📈 Research**\n• \"Show backtest\" — VaultMind vs HODL\n• \"Show price chart\" — OHLCV candlestick\n• \"I want safe yield on my HBAR\" — intent-based recommendation\n• \"I want maximum yield, I'm aggressive\"\n\n" +
+        "**📅 DCA (Auto-executes with Pyth prices)**\n• \"DCA 50 HBAR daily\" — set up recurring deposits\n• \"DCA 100 USDC weekly into Bonzo\" — weekly accumulation\n• \"Show DCA status\" / \"Cancel DCA\" / \"Cancel all DCA\"\n• \"Pause DCA\" / \"Resume DCA\"\n\n" +
+        "**🔷 Stader HBARX Strategy (Pyth-priced)**\n• \"HBARX strategy with 100 HBAR\" — stake→supply→borrow loop\n• \"Stake 50 HBAR with Stader\" — liquid staking only\n• \"Show HBARX info\" — exchange rate, APY & Pyth USD prices\n\n" +
         "**🛡️ Health Monitor**\n• \"Health check\" — position health + liquidation risk\n• \"Monitor positions\" — real-time tracking",
       timestamp: new Date(),
     },

@@ -638,43 +638,251 @@ export function HealthMonitorCard({ data }: HealthMonitorCardProps) {
   );
 }
 
-// ════════════════════════════════════════════
-// 1. PORTFOLIO PIE CHART
-// ════════════════════════════════════════════
+// ═══════════════════════════════════════════
+// Replace PortfolioPieChart in InlineCharts.tsx
+// ═══════════════════════════════════════════
+// ZERO prop changes needed in page.tsx or InlineChart dispatcher.
+// This component is fully self-contained:
+//   1. Reads connected account from localStorage
+//   2. Fetches token balances from Mirror Node directly
+//   3. Fetches HBAR price from Pyth
+//   4. Fetches Bonzo Lend positions
+//   5. Combines everything into one chart
+//
+// In InlineChart dispatcher, keep it simple:
+//   case "portfolio":
+//     return <PortfolioPieChart />;
+// ═══════════════════════════════════════════
 
 export function PortfolioPieChart() {
-  const [data, setData] = useState<any>(null);
+  const [chartData, setChartData] = useState<any[]>([]);
+  const [totalValue, setTotalValue] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  // ── Token metadata ──
+
+  const TOKEN_NAMES: Record<string, string> = {
+    // Testnet
+    "0.0.1183558": "SAUCE", "0.0.3772909": "KARATE", "0.0.1418651": "XSAUCE",
+    "0.0.5449": "USDC", "0.0.2233069": "HBARX", "0.0.2231533": "HBARX",
+    "0.0.15058": "WHBAR",
+    // Mainnet
+    "0.0.731861": "SAUCE", "0.0.2283230": "KARATE", "0.0.1460200": "XSAUCE",
+    "0.0.456858": "USDC", "0.0.834116": "HBARX", "0.0.1456986": "WHBAR",
+    "0.0.3716059": "DOVU", "0.0.4794920": "PACK", "0.0.968069": "HST",
+    "0.0.1159074": "GRELF", "0.0.8279134": "BONZO",
+  };
+
+  const TOKEN_DECIMALS: Record<string, number> = {
+    // Testnet
+    "0.0.1183558": 6, "0.0.3772909": 8, "0.0.1418651": 6,
+    "0.0.5449": 6, "0.0.2233069": 8, "0.0.2231533": 8, "0.0.15058": 8,
+    // Mainnet
+    "0.0.731861": 6, "0.0.2283230": 8, "0.0.1460200": 8,
+    "0.0.456858": 6, "0.0.834116": 8, "0.0.1456986": 8,
+  };
+
+  const TOKEN_COLORS: Record<string, string> = {
+    HBAR: "#10B981", WHBAR: "#059669", USDC: "#3B82F6", SAUCE: "#F97316",
+    KARATE: "#EF4444", XSAUCE: "#A855F7", HBARX: "#06B6D4", DOVU: "#84CC16",
+    PACK: "#EC4899", HST: "#F59E0B", GRELF: "#6366F1", BONZO: "#8B5CF6",
+  };
+
+  const FALLBACK_COLORS = ["#F59E0B", "#EC4899", "#8B5CF6", "#14B8A6", "#F43F5E", "#6366F1"];
 
   useEffect(() => {
-    fetch("/api/charts?type=portfolio")
-      .then((r) => r.json())
-      .then((j) => { if (j.success) setData(j.data); })
-      .catch(() => {})
-      .finally(() => setLoading(false));
+    async function load() {
+      try {
+        // ── Step 1: Get connected account from localStorage ──
+        const accountId =
+          typeof window !== "undefined"
+            ? localStorage.getItem("vaultmind_account")
+            : null;
+
+        if (!accountId) {
+          setError("Connect a wallet first");
+          setLoading(false);
+          return;
+        }
+
+        // ── Step 2: Determine network ──
+        const network = (process.env.NEXT_PUBLIC_HEDERA_NETWORK || "testnet") as string;
+        const mirrorBase =
+          network === "mainnet"
+            ? "https://mainnet.mirrornode.hedera.com"
+            : "https://testnet.mirrornode.hedera.com";
+
+        // ── Step 3: Fetch everything in parallel ──
+        const [accountRes, tokensRes, pythRes, positionsRes] = await Promise.allSettled([
+          fetch(`${mirrorBase}/api/v1/accounts/${accountId}`).then(r => r.json()),
+          fetch(`${mirrorBase}/api/v1/accounts/${accountId}/tokens?limit=25`).then(r => r.json()),
+          fetch("/api/pyth?action=hbar").then(r => r.json()),
+          fetch("/api/positions").then(r => r.json()),
+        ]);
+
+        // ── Step 4: Parse HBAR price from Pyth ──
+        let hbarPrice = 0.1;
+        if (pythRes.status === "fulfilled" && pythRes.value?.success) {
+          hbarPrice = pythRes.value.data?.price || 0.1;
+        }
+
+        // Token price estimates (HBAR from Pyth, rest estimated)
+        const prices: Record<string, number> = {
+          HBAR: hbarPrice, WHBAR: hbarPrice, USDC: 1.0,
+          SAUCE: 0.022, KARATE: 0.001, XSAUCE: 0.025,
+          HBARX: hbarPrice * 1.21, DOVU: 0.003, PACK: 0.005,
+          HST: 0.002, GRELF: 0.001, BONZO: 0.01,
+        };
+
+        const holdingsMap = new Map<string, {
+          symbol: string; balance: number; valueUsd: number;
+          color: string; platform: string;
+        }>();
+
+        // ── Step 5: Parse HBAR balance ──
+        if (accountRes.status === "fulfilled") {
+          const hbarTinybar = parseInt(accountRes.value?.balance?.balance || "0");
+          const hbarBalance = hbarTinybar / 1e8;
+          if (hbarBalance > 0) {
+            holdingsMap.set("HBAR", {
+              symbol: "HBAR",
+              balance: hbarBalance,
+              valueUsd: hbarBalance * hbarPrice,
+              color: TOKEN_COLORS.HBAR,
+              platform: "Wallet",
+            });
+          }
+        }
+
+        // ── Step 6: Parse ALL wallet tokens ──
+        if (tokensRes.status === "fulfilled") {
+          const tokens = tokensRes.value?.tokens || [];
+          for (const t of tokens) {
+            const rawBalance = parseInt(t.balance || "0");
+            if (rawBalance <= 0) continue;
+
+            const tokenId = t.token_id;
+            const symbol = TOKEN_NAMES[tokenId] || tokenId;
+            const decimals = TOKEN_DECIMALS[tokenId] || 8;
+            const balance = rawBalance / Math.pow(10, decimals);
+            const price = prices[symbol] || 0;
+            const valueUsd = balance * price;
+
+            // WHBAR gets its own entry (don't merge with HBAR)
+            const key = symbol;
+            const existing = holdingsMap.get(key);
+            if (existing && key !== "WHBAR") {
+              existing.balance += balance;
+              existing.valueUsd += valueUsd;
+            } else {
+              holdingsMap.set(key === "WHBAR" ? "WHBAR_wallet" : key, {
+                symbol,
+                balance,
+                valueUsd,
+                color: TOKEN_COLORS[symbol] || FALLBACK_COLORS[holdingsMap.size % FALLBACK_COLORS.length],
+                platform: "Wallet",
+              });
+            }
+          }
+        }
+
+        // ── Step 7: Parse Bonzo Lend supplied positions ──
+        if (positionsRes.status === "fulfilled" && positionsRes.value?.success) {
+          const positions = positionsRes.value.data?.positions || positionsRes.value.data || [];
+          for (const pos of positions) {
+            const sym = (pos.token || pos.symbol || "").toUpperCase();
+            const supplied = parseFloat(pos.aTokenBalance || pos.supplied || "0");
+            if (supplied <= 0) continue;
+
+            const price = prices[sym] || (sym.includes("HBAR") ? hbarPrice : 0);
+            const valueUsd = supplied * price;
+
+            holdingsMap.set(`${sym}_bonzo`, {
+              symbol: `${sym} (Supplied)`,
+              balance: supplied,
+              valueUsd,
+              color: TOKEN_COLORS[sym] || "#6366F1",
+              platform: "Bonzo Lend",
+            });
+          }
+        }
+
+        // ── Step 8: Build final sorted array with percentages ──
+        const holdings = Array.from(holdingsMap.values())
+          .filter(h => h.balance > 0)
+          .sort((a, b) => b.valueUsd - a.valueUsd);
+
+        const total = holdings.reduce((s, h) => s + h.valueUsd, 0);
+
+        const final = holdings.map((h, i) => ({
+          ...h,
+          percentage: total > 0 ? ((h.valueUsd / total) * 100).toFixed(1) : "0",
+          fill: h.color,
+        }));
+
+        setChartData(final);
+        setTotalValue(total);
+      } catch (err: any) {
+        console.error("[PortfolioPie] Error:", err);
+        setError("Failed to load portfolio data");
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    load();
   }, []);
 
+  // ── Render states ──
+
   if (loading) return <ChartLoader label="portfolio" />;
-  if (!data) return null;
+
+  if (error || !chartData.length) {
+    return (
+      <div className="my-3 p-4 bg-gray-800/30 rounded-xl border border-gray-700/30 text-center">
+        <span className="text-xs text-gray-500">{error || "No portfolio data. Connect a wallet first."}</span>
+      </div>
+    );
+  }
+
+  // ── Tooltip ──
 
   const CustomTooltip = ({ active, payload }: any) => {
     if (!active || !payload?.length) return null;
     const d = payload[0].payload;
     return (
       <div className="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs shadow-xl">
-        <p className="font-medium text-gray-200">{d.symbol}</p>
-        <p className="text-gray-400">${d.valueUsd.toLocaleString()}</p>
+        <div className="flex items-center gap-1.5 mb-1">
+          <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: d.fill }} />
+          <span className="font-semibold text-gray-200">${d.symbol}</span>
+        </div>
+        <p className="text-gray-300">
+          Balance:{" "}
+          <span className="text-white">
+            {d.balance.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+          </span>
+        </p>
+        <p className="text-gray-300">
+          Value:{" "}
+          <span className="text-emerald-400 font-medium">
+            ${d.valueUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+          </span>
+        </p>
         <p className="text-gray-500">{d.percentage}% • {d.platform}</p>
       </div>
     );
   };
 
+  // ── Chart ──
+
   return (
     <div className="my-3 p-4 bg-gray-800/30 rounded-xl border border-gray-700/30 w-full">
       <div className="flex items-center justify-between mb-2">
         <span className="text-sm font-semibold text-gray-200">Portfolio Breakdown</span>
-        <span className="text-xs text-gray-500">
-          Total: ${data.totalValue.toLocaleString()}
+        <span className="text-xs text-emerald-400 font-medium bg-emerald-500/10 px-2 py-0.5 rounded-full">
+          Total: ${totalValue.toLocaleString(undefined, { maximumFractionDigits: 2 })}
         </span>
       </div>
       <div className="flex flex-col sm:flex-row items-center gap-4">
@@ -682,7 +890,7 @@ export function PortfolioPieChart() {
           <ResponsiveContainer width="100%" height="100%">
             <PieChart>
               <Pie
-                data={data.holdings}
+                data={chartData}
                 dataKey="valueUsd"
                 nameKey="symbol"
                 cx="50%"
@@ -690,43 +898,80 @@ export function PortfolioPieChart() {
                 innerRadius={45}
                 outerRadius={85}
                 paddingAngle={2}
-                strokeWidth={0}
+                strokeWidth={1}
+                stroke="#111827"
+                onMouseEnter={(_, i) => setHoveredIndex(i)}
+                onMouseLeave={() => setHoveredIndex(null)}
               >
-                {data.holdings.map((_: any, i: number) => (
-                  <Cell key={i} fill={COLORS[i % COLORS.length]} />
+                {chartData.map((h, i) => (
+                  <Cell
+                    key={h.symbol + i}
+                    fill={h.fill}
+                    opacity={hoveredIndex === null || hoveredIndex === i ? 1 : 0.35}
+                    style={{ transition: "opacity 0.2s" }}
+                  />
                 ))}
               </Pie>
               <Tooltip content={<CustomTooltip />} />
+              <text x="50%" y="48%" textAnchor="middle" fill="#9CA3AF" fontSize={10}>
+                {chartData.length} assets
+              </text>
+              <text x="50%" y="58%" textAnchor="middle" fill="#E5E7EB" fontSize={14} fontWeight="bold">
+                {hoveredIndex !== null
+                  ? `${chartData[hoveredIndex]?.percentage}%`
+                  : `$${totalValue >= 1000 ? (totalValue / 1000).toFixed(1) + "K" : totalValue.toFixed(0)}`}
+              </text>
             </PieChart>
           </ResponsiveContainer>
         </div>
-        <div className="flex-1 space-y-1.5">
-          {data.holdings.slice(0, 6).map((h: any, i: number) => (
-            <div key={h.symbol} className="flex items-center gap-2 text-xs">
+        <div className="flex-1 space-y-1.5 min-w-0">
+          {chartData.map((h, i) => (
+            <div
+              key={h.symbol + i}
+              className={`flex items-center gap-2 text-xs px-2 py-1.5 rounded-lg transition-all cursor-pointer ${
+                hoveredIndex === i
+                  ? "bg-gray-700/60 ring-1 ring-gray-600"
+                  : "bg-gray-800/30 hover:bg-gray-800/50"
+              }`}
+              onMouseEnter={() => setHoveredIndex(i)}
+              onMouseLeave={() => setHoveredIndex(null)}
+            >
               <span
                 className="w-2.5 h-2.5 rounded-full flex-shrink-0"
-                style={{ backgroundColor: COLORS[i % COLORS.length] }}
+                style={{ backgroundColor: h.fill }}
               />
-              <span className="text-gray-300 flex-1">{h.symbol}</span>
-              <span className="text-gray-500">{h.percentage}%</span>
-              <span className="text-gray-400 w-16 text-right">
-                ${h.valueUsd.toLocaleString()}
+              <span className="text-gray-200 font-medium flex-1 truncate">${h.symbol}</span>
+              <span className="text-gray-500 text-[10px] w-10 text-right">{h.percentage}%</span>
+              <span className="text-gray-400 w-20 text-right tabular-nums">
+                ${h.valueUsd >= 1000
+                  ? (h.valueUsd / 1000).toFixed(1) + "K"
+                  : h.valueUsd.toFixed(2)}
               </span>
             </div>
           ))}
+          <div className="text-[10px] text-gray-600 text-center pt-1">
+            HBAR: Pyth Network • Tokens: estimated prices
+          </div>
         </div>
       </div>
     </div>
   );
 }
+ 
+
+// ═══════════════════════════════════════════════════════════
+// UPGRADED COMPONENTS — Replace in InlineCharts.tsx
+// ═══════════════════════════════════════════════════════════
+
 
 // ════════════════════════════════════════════
-// 2. CORRELATION MATRIX
+// 1. CORRELATION MATRIX — Redesigned
 // ════════════════════════════════════════════
 
 export function CorrelationMatrix() {
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [hoveredCell, setHoveredCell] = useState<{ row: number; col: number } | null>(null);
 
   useEffect(() => {
     fetch("/api/charts?type=correlation&days=30")
@@ -741,73 +986,155 @@ export function CorrelationMatrix() {
 
   const { symbols, matrix } = data;
 
-  function corrColor(v: number): string {
-    if (v >= 0.7) return "bg-emerald-500/60";
-    if (v >= 0.3) return "bg-emerald-500/30";
-    if (v >= -0.3) return "bg-gray-600/30";
-    if (v >= -0.7) return "bg-red-500/30";
-    return "bg-red-500/60";
+  // Smooth gradient from red → gray → green
+  function corrBg(v: number): string {
+    if (v >= 0.8) return "rgba(16, 185, 129, 0.5)";
+    if (v >= 0.5) return "rgba(16, 185, 129, 0.3)";
+    if (v >= 0.2) return "rgba(16, 185, 129, 0.15)";
+    if (v >= -0.2) return "rgba(107, 114, 128, 0.15)";
+    if (v >= -0.5) return "rgba(239, 68, 68, 0.15)";
+    if (v >= -0.8) return "rgba(239, 68, 68, 0.3)";
+    return "rgba(239, 68, 68, 0.5)";
   }
 
+  function corrText(v: number): string {
+    if (v >= 0.5) return "#6ee7b7";
+    if (v >= 0.2) return "#a7f3d0";
+    if (v >= -0.2) return "#9ca3af";
+    if (v >= -0.5) return "#fca5a5";
+    return "#f87171";
+  }
+
+  const isHighlighted = (row: number, col: number) =>
+    hoveredCell !== null && (hoveredCell.row === row || hoveredCell.col === col);
+
   return (
-    <div className="my-3 p-4 bg-gray-800/30 rounded-xl border border-gray-700/30 w-full">
-      <span className="text-sm font-semibold text-gray-200 block mb-3">
-        Asset Correlation Matrix (30d)
-      </span>
-      <div className="overflow-x-auto">
-        <table className="text-xs w-full">
+    <div className="my-3 rounded-xl border border-gray-700/30 overflow-hidden" style={{ background: "rgba(17, 24, 39, 0.6)" }}>
+      {/* Header */}
+      <div className="px-4 py-3 border-b border-gray-800/50 flex items-center justify-between"
+        style={{ background: "linear-gradient(135deg, rgba(139,92,246,0.08), rgba(16,185,129,0.05))" }}>
+        <div className="flex items-center gap-2">
+          <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: "rgba(139,92,246,0.15)" }}>
+            <span className="text-sm">🔗</span>
+          </div>
+          <div>
+            <span className="text-sm font-semibold text-gray-200">Asset Correlation Matrix</span>
+            <span className="text-[10px] text-gray-500 ml-2">30-day rolling</span>
+          </div>
+        </div>
+        <div className="flex items-center gap-3 text-[10px]">
+          <span className="flex items-center gap-1">
+            <span className="w-3 h-3 rounded" style={{ background: "rgba(16,185,129,0.4)" }} /> Positive
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="w-3 h-3 rounded" style={{ background: "rgba(107,114,128,0.2)" }} /> Neutral
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="w-3 h-3 rounded" style={{ background: "rgba(239,68,68,0.4)" }} /> Negative
+          </span>
+        </div>
+      </div>
+
+      {/* Matrix */}
+      <div className="p-4 overflow-x-auto">
+        <table className="w-full" style={{ borderSpacing: "3px", borderCollapse: "separate" }}>
           <thead>
             <tr>
-              <th className="px-3 py-1.5 text-gray-500" />
-              {symbols.map((s: string) => (
-                <th key={s} className="px-3 py-1.5 text-gray-400 font-medium text-center">
-                  {s}
+              <th className="w-16" />
+              {symbols.map((s: string, ci: number) => (
+                <th key={s} className="px-1 py-2 text-center">
+                  <span className={`text-[11px] font-semibold transition-colors duration-200 ${
+                    hoveredCell?.col === ci ? "text-emerald-400" : "text-gray-400"
+                  }`}>
+                    {s}
+                  </span>
                 </th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {symbols.map((row: string, i: number) => (
+            {symbols.map((row: string, ri: number) => (
               <tr key={row}>
-                <td className="px-3 py-1.5 text-gray-400 font-medium">{row}</td>
-                {matrix[i].map((v: number, j: number) => (
-                  <td key={j} className="px-1.5 py-1.5 text-center">
-                    <span
-                      className={`inline-block w-full min-w-[3rem] py-1 rounded text-xs font-mono ${corrColor(v)} ${
-                        i === j ? "text-gray-500" : "text-gray-200"
-                      }`}
+                <td className="pr-2 py-0.5">
+                  <span className={`text-[11px] font-semibold transition-colors duration-200 ${
+                    hoveredCell?.row === ri ? "text-emerald-400" : "text-gray-400"
+                  }`}>
+                    {row}
+                  </span>
+                </td>
+                {matrix[ri].map((v: number, ci: number) => {
+                  const isDiag = ri === ci;
+                  const isHovered = hoveredCell?.row === ri && hoveredCell?.col === ci;
+                  return (
+                    <td
+                      key={ci}
+                      className="text-center"
+                      onMouseEnter={() => setHoveredCell({ row: ri, col: ci })}
+                      onMouseLeave={() => setHoveredCell(null)}
                     >
-                      {v.toFixed(2)}
-                    </span>
-                  </td>
-                ))}
+                      <div
+                        className="rounded-lg py-2 px-1 cursor-default transition-all duration-200"
+                        style={{
+                          background: isDiag
+                            ? "rgba(139, 92, 246, 0.12)"
+                            : corrBg(v),
+                          transform: isHovered ? "scale(1.1)" : "scale(1)",
+                          boxShadow: isHovered
+                            ? `0 0 12px ${v >= 0 ? "rgba(16,185,129,0.3)" : "rgba(239,68,68,0.3)"}`
+                            : "none",
+                          opacity: hoveredCell !== null && !isHighlighted(ri, ci) && !isHovered ? 0.4 : 1,
+                          minWidth: "3rem",
+                        }}
+                      >
+                        <span
+                          className="text-xs font-mono font-medium"
+                          style={{ color: isDiag ? "#a78bfa" : corrText(v) }}
+                        >
+                          {isDiag ? "1.00" : v.toFixed(2)}
+                        </span>
+                      </div>
+                    </td>
+                  );
+                })}
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-      <div className="flex items-center gap-3 mt-2 text-[10px] text-gray-600">
-        <span className="flex items-center gap-1">
-          <span className="w-3 h-2 rounded bg-emerald-500/60" /> Strong +
-        </span>
-        <span className="flex items-center gap-1">
-          <span className="w-3 h-2 rounded bg-gray-600/30" /> Neutral
-        </span>
-        <span className="flex items-center gap-1">
-          <span className="w-3 h-2 rounded bg-red-500/60" /> Strong -
-        </span>
-      </div>
+
+      {/* Hover info */}
+      {hoveredCell && hoveredCell.row !== hoveredCell.col && (
+        <div className="px-4 pb-3 flex items-center gap-2 text-[11px]">
+          <span className="text-gray-500">
+            {symbols[hoveredCell.row]} × {symbols[hoveredCell.col]}:
+          </span>
+          <span className="font-mono font-semibold" style={{
+            color: matrix[hoveredCell.row][hoveredCell.col] >= 0 ? "#6ee7b7" : "#fca5a5"
+          }}>
+            {matrix[hoveredCell.row][hoveredCell.col].toFixed(3)}
+          </span>
+          <span className="text-gray-600">
+            {matrix[hoveredCell.row][hoveredCell.col] >= 0.7 ? "— strongly correlated, move together" :
+             matrix[hoveredCell.row][hoveredCell.col] >= 0.3 ? "— moderately correlated" :
+             matrix[hoveredCell.row][hoveredCell.col] >= -0.3 ? "— weak/no correlation (good for diversification)" :
+             matrix[hoveredCell.row][hoveredCell.col] >= -0.7 ? "— inversely correlated (natural hedge)" :
+             "— strongly inverse (strong hedge)"}
+          </span>
+        </div>
+      )}
     </div>
   );
 }
 
+
 // ════════════════════════════════════════════
-// 3. RISK / RETURN SCATTER PLOT
+// 2. RISK / RETURN SCATTER — Redesigned
 // ════════════════════════════════════════════
 
 export function RiskReturnScatter() {
   const [data, setData] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
 
   useEffect(() => {
     fetch("/api/charts?type=riskreturn&days=30")
@@ -820,78 +1147,389 @@ export function RiskReturnScatter() {
   if (loading) return <ChartLoader label="risk analysis" />;
   if (!data.length) return null;
 
+  // Color by Sharpe tier
+  function dotColor(sharpe: number): string {
+    if (sharpe >= 1.0) return "#10b981";  // excellent
+    if (sharpe >= 0.5) return "#3b82f6";  // good
+    if (sharpe >= 0) return "#f59e0b";    // mediocre
+    return "#ef4444";                      // negative
+  }
+
+  function dotGlow(sharpe: number): string {
+    if (sharpe >= 1.0) return "0 0 10px rgba(16,185,129,0.4)";
+    if (sharpe >= 0.5) return "0 0 10px rgba(59,130,246,0.3)";
+    if (sharpe >= 0) return "0 0 10px rgba(245,158,11,0.3)";
+    return "0 0 10px rgba(239,68,68,0.3)";
+  }
+
+  function sharpeLabel(sharpe: number): { label: string; color: string } {
+    if (sharpe >= 1.0) return { label: "Excellent", color: "#10b981" };
+    if (sharpe >= 0.5) return { label: "Good", color: "#3b82f6" };
+    if (sharpe >= 0) return { label: "Mediocre", color: "#f59e0b" };
+    return { label: "Poor", color: "#ef4444" };
+  }
+
   const CustomTooltip = ({ active, payload }: any) => {
     if (!active || !payload?.length) return null;
     const d = payload[0].payload;
+    const tier = sharpeLabel(d.sharpe);
     return (
-      <div className="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs shadow-xl">
-        <p className="font-medium text-gray-200">{d.symbol}</p>
-        <p className="text-gray-400">Return: {d.avgReturn.toFixed(1)}%</p>
-        <p className="text-gray-400">Volatility: {d.volatility.toFixed(1)}%</p>
-        <p className="text-gray-500">Sharpe: {d.sharpe.toFixed(2)}</p>
+      <div className="bg-gray-900 border border-gray-700 rounded-xl px-4 py-3 text-xs shadow-2xl min-w-[160px]">
+        <div className="flex items-center gap-2 mb-2">
+          <div className="w-3 h-3 rounded-full" style={{ backgroundColor: dotColor(d.sharpe), boxShadow: dotGlow(d.sharpe) }} />
+          <span className="font-bold text-gray-100 text-sm">{d.symbol}</span>
+        </div>
+        <div className="space-y-1.5">
+          <div className="flex justify-between">
+            <span className="text-gray-500">Return</span>
+            <span className={d.avgReturn >= 0 ? "text-emerald-400 font-medium" : "text-red-400 font-medium"}>
+              {d.avgReturn >= 0 ? "+" : ""}{d.avgReturn.toFixed(1)}%
+            </span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-gray-500">Volatility</span>
+            <span className="text-gray-300 font-medium">{d.volatility.toFixed(1)}%</span>
+          </div>
+          <div className="flex justify-between items-center pt-1 border-t border-gray-800">
+            <span className="text-gray-500">Sharpe Ratio</span>
+            <div className="flex items-center gap-1.5">
+              <span className="font-bold" style={{ color: tier.color }}>{d.sharpe.toFixed(2)}</span>
+              <span className="text-[9px] px-1.5 py-0.5 rounded-full" style={{
+                color: tier.color,
+                background: `${tier.color}18`,
+              }}>{tier.label}</span>
+            </div>
+          </div>
+        </div>
       </div>
     );
   };
 
   return (
-    <div className="my-3 p-4 bg-gray-800/30 rounded-xl border border-gray-700/30 w-full">
-      <span className="text-sm font-semibold text-gray-200 block mb-3">
-        Risk vs Return (30d Annualized)
-      </span>
-      <div className="h-64">
-        <ResponsiveContainer width="100%" height="100%">
-          <ScatterChart margin={{ top: 5, right: 10, bottom: 5, left: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-            <XAxis
-              dataKey="volatility"
-              name="Volatility"
-              tick={{ fontSize: 10, fill: "#6b7280" }}
-              tickLine={false}
-              axisLine={{ stroke: "#374151" }}
-              label={{
-                value: "Volatility %",
-                position: "bottom",
-                fontSize: 10,
-                fill: "#6b7280",
-                offset: -2,
-              }}
-            />
-            <YAxis
-              dataKey="avgReturn"
-              name="Return"
-              tick={{ fontSize: 10, fill: "#6b7280" }}
-              tickLine={false}
-              axisLine={false}
-              label={{
-                value: "Return %",
-                angle: -90,
-                position: "insideLeft",
-                fontSize: 10,
-                fill: "#6b7280",
-              }}
-            />
-            <ZAxis dataKey="sharpe" range={[60, 200]} />
-            <Tooltip content={<CustomTooltip />} />
-            <Scatter data={data} fill="#10b981">
-              {data.map((d: any, i: number) => (
-                <Cell
-                  key={i}
-                  fill={d.sharpe > 0 ? "#10b981" : "#ef4444"}
-                />
-              ))}
-            </Scatter>
-          </ScatterChart>
-        </ResponsiveContainer>
+    <div className="my-3 rounded-xl border border-gray-700/30 overflow-hidden" style={{ background: "rgba(17, 24, 39, 0.6)" }}>
+      {/* Header */}
+      <div className="px-4 py-3 border-b border-gray-800/50 flex items-center justify-between"
+        style={{ background: "linear-gradient(135deg, rgba(59,130,246,0.08), rgba(16,185,129,0.05))" }}>
+        <div className="flex items-center gap-2">
+          <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: "rgba(59,130,246,0.15)" }}>
+            <span className="text-sm">📊</span>
+          </div>
+          <div>
+            <span className="text-sm font-semibold text-gray-200">Risk vs Return Analysis</span>
+            <span className="text-[10px] text-gray-500 ml-2">30d annualized</span>
+          </div>
+        </div>
+        {/* Sharpe legend */}
+        <div className="flex items-center gap-2 text-[10px]">
+          {[
+            { label: "Excellent", color: "#10b981" },
+            { label: "Good", color: "#3b82f6" },
+            { label: "Mediocre", color: "#f59e0b" },
+            { label: "Poor", color: "#ef4444" },
+          ].map(t => (
+            <span key={t.label} className="flex items-center gap-1">
+              <span className="w-2 h-2 rounded-full" style={{ backgroundColor: t.color }} />
+              <span className="text-gray-500">{t.label}</span>
+            </span>
+          ))}
+        </div>
       </div>
-      <div className="flex flex-wrap gap-2 mt-1">
-        {data.map((d: any, i: number) => (
-          <span
-            key={d.symbol}
-            className="text-[10px] px-2 py-0.5 rounded-full bg-gray-800/60 text-gray-400"
-          >
-            {d.symbol}: {d.sharpe > 0 ? "+" : ""}{d.avgReturn.toFixed(0)}%
-          </span>
-        ))}
+
+      {/* Chart */}
+      <div className="p-4">
+        <div className="h-64">
+          <ResponsiveContainer width="100%" height="100%">
+            <ScatterChart margin={{ top: 10, right: 15, bottom: 25, left: 5 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+              <XAxis
+                dataKey="volatility" name="Volatility"
+                tick={{ fontSize: 10, fill: "#6b7280" }} tickLine={false}
+                axisLine={{ stroke: "#374151" }}
+                label={{ value: "Volatility % →", position: "bottom", fontSize: 10, fill: "#6b7280", offset: -5 }}
+              />
+              <YAxis
+                dataKey="avgReturn" name="Return"
+                tick={{ fontSize: 10, fill: "#6b7280" }} tickLine={false} axisLine={false}
+                label={{ value: "↑ Return %", angle: -90, position: "insideLeft", fontSize: 10, fill: "#6b7280" }}
+              />
+              <ZAxis dataKey="sharpe" range={[80, 250]} />
+              <Tooltip content={<CustomTooltip />} cursor={{ strokeDasharray: "3 3", stroke: "#374151" }} />
+              <Scatter data={data} onMouseEnter={(_, i) => setHoveredIdx(i)} onMouseLeave={() => setHoveredIdx(null)}>
+                {data.map((d: any, i: number) => (
+                  <Cell
+                    key={i}
+                    fill={dotColor(d.sharpe)}
+                    opacity={hoveredIdx === null || hoveredIdx === i ? 1 : 0.3}
+                    stroke={hoveredIdx === i ? "#fff" : "transparent"}
+                    strokeWidth={hoveredIdx === i ? 2 : 0}
+                  />
+                ))}
+              </Scatter>
+            </ScatterChart>
+          </ResponsiveContainer>
+        </div>
+
+        {/* Asset pills */}
+        <div className="flex flex-wrap gap-1.5 mt-3 pt-3 border-t border-gray-800/50">
+        {[...data].sort((a: any, b: any) => b.sharpe - a.sharpe).map((d: any, i: number) => {
+            const tier = sharpeLabel(d.sharpe);
+            return (
+              <div
+                key={d.symbol}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg cursor-default transition-all duration-200 hover:scale-105"
+                style={{
+                  background: hoveredIdx === i ? `${tier.color}18` : "rgba(31,41,55,0.5)",
+                  border: `1px solid ${hoveredIdx === i ? `${tier.color}40` : "rgba(55,65,81,0.3)"}`,
+                }}
+                onMouseEnter={() => setHoveredIdx(data.indexOf(d))}
+                onMouseLeave={() => setHoveredIdx(null)}
+              >
+                <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: dotColor(d.sharpe) }} />
+                <span className="text-[11px] font-medium text-gray-300">{d.symbol}</span>
+                <span className="text-[10px] font-mono" style={{ color: tier.color }}>
+                  {d.avgReturn >= 0 ? "+" : ""}{d.avgReturn.toFixed(0)}%
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// ════════════════════════════════════════════
+// 3. POSITIONS — Redesigned
+// ════════════════════════════════════════════
+
+function PositionsInline({ data }: { data?: any }) {
+  const [positions, setPositions] = useState<any>(data || null);
+  const [loading, setLoading] = useState(!data);
+  const [expandedRow, setExpandedRow] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (data) { setPositions(data); return; }
+    fetch("/api/positions").then(r => r.json()).then(j => {
+      if (j.success) setPositions(j.data);
+    }).finally(() => setLoading(false));
+  }, [data]);
+
+  if (loading) return <ChartLoader label="Fetching positions..." />;
+  if (!positions) return <div className="text-xs text-gray-500 p-3">No position data available</div>;
+
+  const p = positions;
+  const totalSupplied = p.totalSuppliedUSD || 0;
+  const totalBorrowed = p.totalBorrowedUSD || 0;
+  const netWorth = p.netWorthUSD || totalSupplied - totalBorrowed;
+  const hf = p.healthFactor;
+  const isSafe = !hf || hf > 1e10 || hf >= 1.5;
+
+  // Health factor color + label
+  function hfStyle(): { color: string; bg: string; label: string } {
+    if (!hf || hf > 1e10) return { color: "#10b981", bg: "rgba(16,185,129,0.1)", label: "∞ No debt" };
+    if (hf >= 2.0) return { color: "#10b981", bg: "rgba(16,185,129,0.1)", label: `${hf.toFixed(2)} Safe` };
+    if (hf >= 1.5) return { color: "#3b82f6", bg: "rgba(59,130,246,0.1)", label: `${hf.toFixed(2)} Moderate` };
+    if (hf >= 1.2) return { color: "#f59e0b", bg: "rgba(245,158,11,0.1)", label: `${hf.toFixed(2)} Warning` };
+    return { color: "#ef4444", bg: "rgba(239,68,68,0.1)", label: `${hf.toFixed(2)} DANGER` };
+  }
+
+  const hfs = hfStyle();
+
+  // Supply vs borrow bar ratio
+  const total = totalSupplied + totalBorrowed;
+  const supplyPct = total > 0 ? (totalSupplied / total) * 100 : 100;
+
+  return (
+    <div className="my-3 rounded-xl border border-gray-700/30 overflow-hidden" style={{ background: "rgba(17, 24, 39, 0.6)" }}>
+      {/* Header */}
+      <div className="px-4 py-3 border-b border-gray-800/50 flex items-center justify-between"
+        style={{ background: "linear-gradient(135deg, rgba(16,185,129,0.06), rgba(59,130,246,0.04))" }}>
+        <div className="flex items-center gap-2">
+          <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: "rgba(16,185,129,0.15)" }}>
+            <span className="text-sm">🏦</span>
+          </div>
+          <div>
+            <span className="text-sm font-semibold text-gray-200">Bonzo Lend Positions</span>
+            {p.accountId && <span className="text-[10px] text-gray-600 ml-2">{p.accountId}</span>}
+          </div>
+        </div>
+        {/* Health badge */}
+        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold"
+          style={{ color: hfs.color, background: hfs.bg, border: `1px solid ${hfs.color}30` }}>
+          <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: hfs.color, boxShadow: `0 0 6px ${hfs.color}` }} />
+          HF: {hfs.label}
+        </div>
+      </div>
+
+      <div className="p-4 space-y-4">
+        {/* Supply vs Borrow visual bar */}
+        <div>
+          <div className="flex justify-between text-[10px] text-gray-500 mb-1.5">
+            <span>Supplied</span>
+            <span>Borrowed</span>
+          </div>
+          <div className="h-3 rounded-full overflow-hidden flex" style={{ background: "rgba(31,41,55,0.6)" }}>
+            <div
+              className="h-full rounded-l-full transition-all duration-700"
+              style={{
+                width: `${supplyPct}%`,
+                background: "linear-gradient(90deg, #10b981, #059669)",
+                boxShadow: "0 0 8px rgba(16,185,129,0.3)",
+              }}
+            />
+            {totalBorrowed > 0 && (
+              <div
+                className="h-full rounded-r-full transition-all duration-700"
+                style={{
+                  width: `${100 - supplyPct}%`,
+                  background: "linear-gradient(90deg, #dc2626, #ef4444)",
+                  boxShadow: "0 0 8px rgba(239,68,68,0.3)",
+                }}
+              />
+            )}
+          </div>
+        </div>
+
+        {/* Summary cards */}
+        <div className="grid grid-cols-3 gap-2">
+          {[
+            {
+              label: "Supplied",
+              value: `$${totalSupplied.toFixed(2)}`,
+              color: "#10b981",
+              bg: "rgba(16,185,129,0.08)",
+              border: "rgba(16,185,129,0.15)",
+            },
+            {
+              label: "Borrowed",
+              value: `$${totalBorrowed.toFixed(2)}`,
+              color: "#ef4444",
+              bg: "rgba(239,68,68,0.08)",
+              border: "rgba(239,68,68,0.15)",
+            },
+            {
+              label: "Net Worth",
+              value: `$${netWorth.toFixed(2)}`,
+              color: netWorth >= 0 ? "#3b82f6" : "#ef4444",
+              bg: netWorth >= 0 ? "rgba(59,130,246,0.08)" : "rgba(239,68,68,0.08)",
+              border: netWorth >= 0 ? "rgba(59,130,246,0.15)" : "rgba(239,68,68,0.15)",
+            },
+          ].map((card) => (
+            <div
+              key={card.label}
+              className="rounded-xl p-3 text-center"
+              style={{ background: card.bg, border: `1px solid ${card.border}` }}
+            >
+              <div className="text-[10px] text-gray-500 mb-0.5">{card.label}</div>
+              <div className="text-base font-bold" style={{ color: card.color }}>{card.value}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Position rows */}
+        {p.positions && p.positions.length > 0 ? (
+          <div className="space-y-1.5">
+            <div className="text-[10px] text-gray-500 font-medium uppercase tracking-wider px-1">Active Positions</div>
+            {p.positions.map((pos: any, i: number) => {
+              const isExpanded = expandedRow === i;
+              const supplyVal = pos.suppliedUSD || 0;
+              const borrowVal = pos.borrowedUSD || 0;
+              const netVal = supplyVal - borrowVal;
+
+              return (
+                <div
+                  key={i}
+                  className="rounded-xl overflow-hidden cursor-pointer transition-all duration-200"
+                  style={{
+                    background: isExpanded ? "rgba(31,41,55,0.5)" : "rgba(31,41,55,0.25)",
+                    border: `1px solid ${isExpanded ? "rgba(107,114,128,0.3)" : "rgba(55,65,81,0.2)"}`,
+                  }}
+                  onClick={() => setExpandedRow(isExpanded ? null : i)}
+                >
+                  {/* Main row */}
+                  <div className="flex items-center justify-between px-3 py-2.5">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-8 h-8 rounded-lg flex items-center justify-center text-sm font-bold"
+                        style={{ background: "rgba(139,92,246,0.12)", color: "#a78bfa" }}>
+                        {pos.symbol?.charAt(0) || "?"}
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-sm font-semibold text-gray-200">{pos.symbol}</span>
+                          {pos.isCollateral && (
+                            <span className="text-[8px] px-1.5 py-0.5 rounded-full font-medium"
+                              style={{ color: "#10b981", background: "rgba(16,185,129,0.1)", border: "1px solid rgba(16,185,129,0.2)" }}>
+                              COLLATERAL
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-[10px] text-gray-600">
+                          Net: <span className={netVal >= 0 ? "text-emerald-400" : "text-red-400"}>
+                            ${netVal.toFixed(2)}
+                          </span>
+                        </span>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-4">
+                      {supplyVal > 0 && (
+                        <div className="text-right">
+                          <div className="text-sm font-semibold text-emerald-400">${supplyVal.toFixed(2)}</div>
+                          <div className="text-[9px] text-gray-600">{pos.supplyAPY?.toFixed(2)}% APY</div>
+                        </div>
+                      )}
+                      {borrowVal > 0 && (
+                        <div className="text-right">
+                          <div className="text-sm font-semibold text-red-400">-${borrowVal.toFixed(2)}</div>
+                          <div className="text-[9px] text-gray-600">{pos.borrowAPY?.toFixed(2)}% APY</div>
+                        </div>
+                      )}
+                      <span className={`text-gray-600 text-xs transition-transform duration-200 ${isExpanded ? "rotate-180" : ""}`}>
+                        ▾
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Expanded details */}
+                  {isExpanded && (
+                    <div className="px-3 pb-3 pt-1 border-t border-gray-800/30 grid grid-cols-2 gap-2">
+                      <div className="rounded-lg p-2" style={{ background: "rgba(16,185,129,0.06)" }}>
+                        <div className="text-[9px] text-gray-500">Supplied Amount</div>
+                        <div className="text-xs text-emerald-400 font-medium">{pos.supplied?.toFixed(4) || "0"} {pos.symbol}</div>
+                      </div>
+                      <div className="rounded-lg p-2" style={{ background: "rgba(239,68,68,0.06)" }}>
+                        <div className="text-[9px] text-gray-500">Borrowed Amount</div>
+                        <div className="text-xs text-red-400 font-medium">{pos.borrowed?.toFixed(4) || "0"} {pos.symbol}</div>
+                      </div>
+                      <div className="rounded-lg p-2" style={{ background: "rgba(59,130,246,0.06)" }}>
+                        <div className="text-[9px] text-gray-500">Supply APY</div>
+                        <div className="text-xs text-blue-400 font-medium">{pos.supplyAPY?.toFixed(2) || "0"}%</div>
+                      </div>
+                      <div className="rounded-lg p-2" style={{ background: "rgba(245,158,11,0.06)" }}>
+                        <div className="text-[9px] text-gray-500">Borrow APY</div>
+                        <div className="text-xs text-yellow-400 font-medium">{pos.borrowAPY?.toFixed(2) || "0"}%</div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="text-center py-6 space-y-2">
+            <div className="text-2xl">🏦</div>
+            <p className="text-xs text-gray-500">No active Bonzo Lend positions</p>
+            <p className="text-[10px] text-gray-600">Try: "Supply 100 HBAR to Bonzo"</p>
+          </div>
+        )}
+
+        {/* Footer */}
+        {p.averageNetAPY !== undefined && p.averageNetAPY !== 0 && (
+          <div className="flex items-center justify-center gap-2 pt-2 border-t border-gray-800/40">
+            <span className="text-[10px] text-gray-500">Average Net APY:</span>
+            <span className="text-xs font-semibold text-emerald-400">{p.averageNetAPY.toFixed(2)}%</span>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1426,7 +2064,7 @@ export type ChartType =
   | "dca"
   | "stader"
   | "healthmonitor"
-
+  | "recommendation"
   // Action-based inline components (Jarvis mode)
   | "keeper"
   | "positions"
@@ -1572,6 +2210,31 @@ export function detectCharts(message: string): ChartType[] {
   }
 
   // ── Jarvis Mode: Action/Feature Commands ──
+
+// ── Intent-Based Recommendations ──
+if (
+  lower.includes("i want") ||
+  lower.includes("safe yield") ||
+  lower.includes("low risk yield") ||
+  lower.includes("maximize return") ||
+  lower.includes("maximum yield") ||
+  lower.includes("best strategy") ||
+  lower.includes("what should i do with") ||
+  lower.includes("where should i put") ||
+  lower.includes("how can i earn") ||
+  lower.includes("earn yield") ||
+  lower.includes("i'm aggressive") ||
+  lower.includes("im aggressive") ||
+  lower.includes("conservative strategy") ||
+  lower.includes("aggressive strategy") ||
+  lower.includes("suggest a vault") ||
+  lower.includes("recommend") ||
+  lower.includes("safest option") ||
+  lower.includes("highest apy") ||
+  lower.includes("what's the best")
+) {
+  charts.push("recommendation");
+}
 
   // Keeper — run/execute/dry run
   if (
@@ -1787,84 +2450,6 @@ function KeeperResultInline({ data }: { data?: any }) {
               <span className="text-emerald-400">✓ HCS Logged</span>
             </>
           )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ============================================
-// Positions Inline Component
-// ============================================
-
-function PositionsInline({ data }: { data?: any }) {
-  const [positions, setPositions] = useState<any>(data || null);
-  const [loading, setLoading] = useState(!data);
-
-  useEffect(() => {
-    if (data) { setPositions(data); return; }
-    fetch("/api/positions").then(r => r.json()).then(j => {
-      if (j.success) setPositions(j.data);
-    }).finally(() => setLoading(false));
-  }, [data]);
-
-  if (loading) return <ChartLoader label="Fetching positions..." />;
-  if (!positions) return <div className="text-xs text-gray-500 p-3">No position data available</div>;
-
-  const p = positions;
-  return (
-    <div className="rounded-xl border border-gray-800/40 bg-gray-900/60 p-4 space-y-3">
-      <div className="flex items-center gap-2 text-sm font-medium text-gray-300">
-        <span>📊</span> Bonzo Lend Positions
-        <span className="text-[10px] text-gray-500 ml-auto">{p.accountId}</span>
-      </div>
-
-      {/* Summary Row */}
-      <div className="grid grid-cols-4 gap-2 text-center">
-        {[
-          { label: "Supplied", value: `$${(p.totalSuppliedUSD || 0).toFixed(2)}`, color: "text-emerald-400" },
-          { label: "Borrowed", value: `$${(p.totalBorrowedUSD || 0).toFixed(2)}`, color: "text-red-400" },
-          { label: "Net Worth", value: `$${(p.netWorthUSD || 0).toFixed(2)}`, color: "text-blue-400" },
-          { label: "Health Factor", value: !p.healthFactor || p.healthFactor > 1e10 ? "∞ Safe" : p.healthFactor.toFixed(2), color: !p.healthFactor || p.healthFactor > 1e10 || p.healthFactor >= 1.5 ? "text-emerald-400" : p.healthFactor < 1.2 ? "text-red-400" : "text-yellow-400" },
-        ].map((item) => (
-          <div key={item.label} className="bg-gray-800/40 rounded-lg p-2">
-            <div className="text-[10px] text-gray-500">{item.label}</div>
-            <div className={`text-sm font-semibold ${item.color}`}>{item.value}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* Position Rows */}
-      {p.positions && p.positions.length > 0 ? (
-        <div className="space-y-1">
-          {p.positions.map((pos: any, i: number) => (
-            <div key={i} className="flex items-center justify-between px-3 py-2 rounded-lg bg-gray-800/30 text-xs">
-              <div className="flex items-center gap-2">
-                <span className="font-medium text-gray-200">{pos.symbol}</span>
-                {pos.isCollateral && <span className="text-[9px] text-emerald-400/70 bg-emerald-500/10 rounded px-1">collateral</span>}
-              </div>
-              <div className="flex gap-4 text-right">
-                <div>
-                  <div className="text-emerald-400">${(pos.suppliedUSD || 0).toFixed(2)}</div>
-                  <div className="text-[9px] text-gray-600">{pos.supplyAPY?.toFixed(2)}% APY</div>
-                </div>
-                {pos.borrowedUSD > 0 && (
-                  <div>
-                    <div className="text-red-400">-${pos.borrowedUSD.toFixed(2)}</div>
-                    <div className="text-[9px] text-gray-600">{pos.borrowAPY?.toFixed(2)}% APY</div>
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <p className="text-xs text-gray-500 text-center py-2">No active Bonzo Lend positions</p>
-      )}
-
-      {p.averageNetAPY !== undefined && p.averageNetAPY !== 0 && (
-        <div className="text-[10px] text-gray-500 text-center pt-1 border-t border-gray-800/50">
-          Average Net APY: <span className="text-emerald-400">{p.averageNetAPY.toFixed(2)}%</span>
         </div>
       )}
     </div>
@@ -2210,6 +2795,28 @@ function DecisionHistoryInline({ data }: { data?: any }) {
 // ============================================
 
 function WalletInfoInline({ data }: { data?: any }) {
+  const [hoveredToken, setHoveredToken] = useState<string | null>(null);
+  const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+
+  // Token name mapping
+  const TOKEN_NAMES: Record<string, { symbol: string; color: string }> = {
+    "0.0.1183558": { symbol: "SAUCE", color: "#F97316" },
+    "0.0.3772909": { symbol: "KARATE", color: "#EF4444" },
+    "0.0.1418651": { symbol: "XSAUCE", color: "#A855F7" },
+    "0.0.5449":    { symbol: "USDC", color: "#3B82F6" },
+    "0.0.2231533": { symbol: "HBARX", color: "#06B6D4" },
+    "0.0.2233069": { symbol: "HBARX", color: "#06B6D4" },
+    "0.0.15058":   { symbol: "WHBAR", color: "#10B981" },
+    "0.0.731861":  { symbol: "SAUCE", color: "#F97316" },
+    "0.0.834116":  { symbol: "HBARX", color: "#06B6D4" },
+    "0.0.456858":  { symbol: "USDC", color: "#3B82F6" },
+    "0.0.1456986": { symbol: "WHBAR", color: "#10B981" },
+    "0.0.1460200": { symbol: "XSAUCE", color: "#A855F7" },
+    "0.0.2283230": { symbol: "KARATE", color: "#EF4444" },
+  };
+
+  const FALLBACK_COLORS = ["#F59E0B", "#EC4899", "#8B5CF6", "#14B8A6", "#F43F5E", "#6366F1"];
+
   if (!data) {
     return (
       <div className="rounded-xl border border-gray-800/40 bg-gray-900/60 p-4 text-center">
@@ -2218,39 +2825,228 @@ function WalletInfoInline({ data }: { data?: any }) {
     );
   }
 
+  // Build token list with resolved names
+  const hbarBalance = data.hbarBalance || 0;
+  const hbarUSD = data.hbarBalanceUSD || 0;
+  const hbarPrice = hbarBalance > 0 ? hbarUSD / hbarBalance : 0;
+
+  const resolvedTokens = (data.tokens || []).map((t: any, i: number) => {
+    const mapped = TOKEN_NAMES[t.tokenId];
+    return {
+      id: t.tokenId,
+      symbol: mapped?.symbol || t.symbol || `TOKEN`,
+      balance: t.balance || 0,
+      color: mapped?.color || FALLBACK_COLORS[i % FALLBACK_COLORS.length],
+    };
+  }).filter((t: any) => t.balance > 0);
+
+  // Build chart data: HBAR + tokens
+  // For the donut we need some kind of "value" — use balance as relative weight
+  // since we don't have USD values for all tokens
+  const chartItems = [
+    { symbol: "HBAR", balance: hbarBalance, color: "#10B981", usd: hbarUSD },
+    ...resolvedTokens.map((t: any) => ({ ...t, usd: 0 })),
+  ].filter(item => item.balance > 0);
+
+  const totalBalance = chartItems.reduce((s, t) => s + t.balance, 0);
+
+  // SVG donut chart
+  const size = 160;
+  const cx = size / 2;
+  const cy = size / 2;
+  const outerR = 68;
+  const innerR = 44;
+
+  let cumulativeAngle = -90; // start from top
+  const arcs = chartItems.map((item) => {
+    const pct = totalBalance > 0 ? (item.balance / totalBalance) * 100 : 0;
+    const angle = (pct / 100) * 360;
+    const startAngle = cumulativeAngle;
+    cumulativeAngle += angle;
+    const endAngle = cumulativeAngle;
+
+    const startRad = (startAngle * Math.PI) / 180;
+    const endRad = (endAngle * Math.PI) / 180;
+
+    const x1Outer = cx + outerR * Math.cos(startRad);
+    const y1Outer = cy + outerR * Math.sin(startRad);
+    const x2Outer = cx + outerR * Math.cos(endRad);
+    const y2Outer = cy + outerR * Math.sin(endRad);
+    const x1Inner = cx + innerR * Math.cos(endRad);
+    const y1Inner = cy + innerR * Math.sin(endRad);
+    const x2Inner = cx + innerR * Math.cos(startRad);
+    const y2Inner = cy + innerR * Math.sin(startRad);
+
+    const largeArc = angle > 180 ? 1 : 0;
+
+    // For very small slices or single item
+    if (pct >= 99.9) {
+      return {
+        ...item, pct,
+        path: `M ${cx} ${cy - outerR} A ${outerR} ${outerR} 0 1 1 ${cx - 0.01} ${cy - outerR} Z M ${cx} ${cy - innerR} A ${innerR} ${innerR} 0 1 0 ${cx - 0.01} ${cy - innerR} Z`,
+      };
+    }
+
+    const path = [
+      `M ${x1Outer} ${y1Outer}`,
+      `A ${outerR} ${outerR} 0 ${largeArc} 1 ${x2Outer} ${y2Outer}`,
+      `L ${x1Inner} ${y1Inner}`,
+      `A ${innerR} ${innerR} 0 ${largeArc} 0 ${x2Inner} ${y2Inner}`,
+      `Z`,
+    ].join(" ");
+
+    return { ...item, pct, path };
+  });
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    setMousePos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+  };
+
   return (
     <div className="rounded-xl border border-emerald-800/40 bg-gray-900/60 p-4 space-y-3">
-      <div className="flex items-center gap-2 text-sm font-medium text-emerald-400">
-        <span>👛</span> Wallet Connected
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2 text-sm font-medium text-emerald-400">
+          <span>👛</span> Wallet Connected
+        </div>
+        <span className="text-[10px] text-gray-600 bg-gray-800/60 px-2 py-0.5 rounded-full">
+          {data.network || "testnet"}
+        </span>
       </div>
+
+      {/* Account + Balance row */}
       <div className="grid grid-cols-3 gap-2">
         <div className="bg-gray-800/40 rounded-lg p-2 text-center">
           <div className="text-[10px] text-gray-500">Account</div>
           <div className="text-xs font-medium text-gray-200">{data.accountId}</div>
         </div>
         <div className="bg-gray-800/40 rounded-lg p-2 text-center">
-          <div className="text-[10px] text-gray-500">HBAR</div>
-          <div className="text-sm font-semibold text-emerald-400">{(data.hbarBalance || 0).toFixed(2)}</div>
+          <div className="text-[10px] text-gray-500">HBAR Balance</div>
+          <div className="text-sm font-semibold text-emerald-400">{hbarBalance.toFixed(2)}</div>
         </div>
         <div className="bg-gray-800/40 rounded-lg p-2 text-center">
           <div className="text-[10px] text-gray-500">USD Value</div>
-          <div className="text-sm font-semibold text-blue-400">${(data.hbarBalanceUSD || 0).toFixed(2)}</div>
+          <div className="text-sm font-semibold text-blue-400">${hbarUSD.toFixed(2)}</div>
         </div>
       </div>
-      {data.tokens && data.tokens.length > 0 && (
-        <div className="space-y-1">
-          <div className="text-[10px] text-gray-500">Token Balances</div>
-          {data.tokens.slice(0, 5).map((t: any) => (
-            <div key={t.tokenId} className="flex justify-between text-xs px-2 py-1 bg-gray-800/30 rounded">
-              <span className="text-gray-300">{t.symbol}</span>
-              <span className="text-gray-400">{t.balance.toFixed(4)}</span>
-            </div>
-          ))}
+
+      {/* Donut Chart + Legend */}
+      {chartItems.length > 0 && (
+        <div className="flex items-center gap-4 pt-1">
+          {/* Donut */}
+          <div
+            className="relative flex-shrink-0"
+            onMouseMove={handleMouseMove}
+            onMouseLeave={() => setHoveredToken(null)}
+          >
+            <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+              {/* Background ring */}
+              <circle cx={cx} cy={cy} r={outerR} fill="none" stroke="#1F2937" strokeWidth={outerR - innerR} opacity={0.3} />
+
+              {arcs.map((arc, i) => (
+                <path
+                  key={arc.symbol + i}
+                  d={arc.path}
+                  fill={arc.color}
+                  stroke="#111827"
+                  strokeWidth={1}
+                  opacity={hoveredToken === null || hoveredToken === arc.symbol ? 1 : 0.3}
+                  style={{
+                    cursor: "pointer",
+                    transition: "opacity 0.2s, transform 0.2s",
+                    transformOrigin: `${cx}px ${cy}px`,
+                    transform: hoveredToken === arc.symbol ? "scale(1.04)" : "scale(1)",
+                  }}
+                  onMouseEnter={() => setHoveredToken(arc.symbol)}
+                />
+              ))}
+
+              {/* Center text */}
+              <text x={cx} y={cy - 6} textAnchor="middle" fill="#9CA3AF" fontSize="9" fontFamily="Arial">
+                {chartItems.length} tokens
+              </text>
+              <text x={cx} y={cy + 10} textAnchor="middle" fill="#E5E7EB" fontSize="12" fontWeight="bold" fontFamily="Arial">
+                {hoveredToken
+                  ? `${arcs.find(a => a.symbol === hoveredToken)?.pct.toFixed(1)}%`
+                  : `$${hbarUSD.toFixed(0)}`
+                }
+              </text>
+            </svg>
+
+            {/* Tooltip */}
+            {hoveredToken && (
+              <div
+                className="absolute z-50 pointer-events-none bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 shadow-xl"
+                style={{
+                  left: Math.min(mousePos.x + 12, size - 100),
+                  top: mousePos.y - 60,
+                }}
+              >
+                {(() => {
+                  const t = arcs.find(a => a.symbol === hoveredToken);
+                  if (!t) return null;
+                  return (
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-1.5">
+                        <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: t.color }} />
+                        <span className="text-xs font-semibold text-white">${t.symbol}</span>
+                      </div>
+                      <div className="text-[11px] text-gray-300">
+                        Balance: <span className="text-white font-medium">{t.balance.toLocaleString(undefined, { maximumFractionDigits: 4 })}</span>
+                      </div>
+                      <div className="text-[11px] text-gray-300">
+                        Share: <span className="text-white font-medium">{t.pct.toFixed(1)}%</span>
+                      </div>
+                      {t.usd > 0 && (
+                        <div className="text-[11px] text-gray-300">
+                          Value: <span className="text-emerald-400 font-medium">${t.usd.toFixed(2)}</span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+          </div>
+
+          {/* Legend */}
+          <div className="flex-1 space-y-1.5 min-w-0">
+            {arcs.map((arc, i) => (
+              <div
+                key={arc.symbol + i}
+                className={`flex items-center justify-between text-xs px-2 py-1.5 rounded-lg cursor-pointer transition-all ${
+                  hoveredToken === arc.symbol
+                    ? "bg-gray-700/60 ring-1 ring-gray-600"
+                    : "bg-gray-800/30 hover:bg-gray-800/50"
+                }`}
+                onMouseEnter={() => setHoveredToken(arc.symbol)}
+                onMouseLeave={() => setHoveredToken(null)}
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: arc.color }} />
+                  <span className="text-gray-200 font-medium truncate">${arc.symbol}</span>
+                </div>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <span className="text-gray-400 tabular-nums">
+                    {arc.balance >= 1000
+                      ? `${(arc.balance / 1000).toFixed(1)}K`
+                      : arc.balance.toFixed(arc.balance < 1 ? 4 : 2)}
+                  </span>
+                  <span className="text-gray-600 text-[10px] w-10 text-right">{arc.pct.toFixed(1)}%</span>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
-      <div className="text-[10px] text-gray-600 text-center">
-        Network: {data.network || "testnet"} {data.evmAddress && `• EVM: ${data.evmAddress.substring(0, 10)}...`}
-      </div>
+
+      {/* EVM Address */}
+      {data.evmAddress && (
+        <div className="text-[10px] text-gray-600 text-center pt-1 border-t border-gray-800/40">
+          EVM: {data.evmAddress}
+        </div>
+      )}
     </div>
   );
 }
@@ -2322,6 +3118,8 @@ export function InlineChart({
       return <ConfirmActionInline data={data} onAction={onAction} />;
     case "inlineerror":
       return <ErrorInline data={data} />;
+      case "recommendation":
+        return <RecommendationInline data={data} onAction={onAction} />;  
     default:
       return null;
   }
@@ -2380,6 +3178,352 @@ function StrategyConfigInline({ data }: { data?: any }) {
 
       <div className="text-[10px] text-gray-600 text-center pt-1 border-t border-gray-800/50">
         Keeper will use these parameters on next cycle
+      </div>
+    </div>
+  );
+}
+
+function RecommendationInline({ data, onAction }: { data?: any; onAction?: (a: string, p?: any) => void }) {
+  const [vaults, setVaults] = useState<any[]>([]);
+  const [markets, setMarkets] = useState<any[]>([]);
+  const [sentiment, setSentiment] = useState<any>(null);
+  const [hbarPrice, setHbarPrice] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [selectedOption, setSelectedOption] = useState<number | null>(null);
+ 
+  // Detect user intent from agent response
+  const isAggressive = data?.intent === "aggressive" ||
+    data?.response?.toLowerCase()?.includes("aggressive") ||
+    data?.response?.toLowerCase()?.includes("maximum");
+  const isSafe = !isAggressive;
+ 
+  useEffect(() => {
+    async function load() {
+      try {
+        const [vaultRes, marketRes, sentRes, pythRes] = await Promise.allSettled([
+          fetch("/api/vaults?action=compare&goal=" + (isSafe ? "safe-yield" : "max-yield")).then(r => r.json()),
+          fetch("/api/market").then(r => r.json()),
+          fetch("/api/market").then(r => r.json()), // sentiment comes with market
+          fetch("/api/pyth?action=hbar").then(r => r.json()),
+        ]);
+ 
+        if (vaultRes.status === "fulfilled" && vaultRes.value?.success) {
+          setVaults((vaultRes.value.data?.comparisons || []).slice(0, 5));
+        }
+        if (marketRes.status === "fulfilled" && marketRes.value?.success) {
+          const mkts = marketRes.value.data?.markets || [];
+          setMarkets(mkts.filter((m: any) => m.supplyAPY > 0).sort((a: any, b: any) => b.supplyAPY - a.supplyAPY).slice(0, 5));
+        }
+        if (pythRes.status === "fulfilled" && pythRes.value?.success) {
+          setHbarPrice(pythRes.value.data?.price || 0);
+        }
+      } catch {}
+      setLoading(false);
+    }
+    load();
+  }, []);
+ 
+  if (loading) return <ChartLoader label="Scanning opportunities..." />;
+ 
+  const riskColors: Record<string, { color: string; bg: string; label: string }> = {
+    low: { color: "#10b981", bg: "rgba(16,185,129,0.08)", label: "Low Risk" },
+    medium: { color: "#f59e0b", bg: "rgba(245,158,11,0.08)", label: "Medium Risk" },
+    high: { color: "#ef4444", bg: "rgba(239,68,68,0.08)", label: "High Risk" },
+  };
+ 
+  // Build unified recommendations: top vaults + top lending
+  interface Option {
+    type: "vault" | "lending" | "stader";
+    name: string;
+    apy: number;
+    risk: string;
+    protocol: string;
+    score: number;
+    action: string;
+    params: any;
+    description: string;
+  }
+ 
+  const options: Option[] = [];
+ 
+  // Vault options
+  for (const v of vaults) {
+    options.push({
+      type: "vault",
+      name: v.name,
+      apy: v.apy || 0,
+      risk: v.risk || "medium",
+      protocol: "Bonzo Vault",
+      score: v.score || 50,
+      action: "vault_deposit",
+      params: { vaultId: v.id, vault: v.name },
+      description: v.strategy === "single-asset-dex"
+        ? "Single-sided concentrated liquidity on SaucerSwap V2"
+        : v.strategy === "dual-asset-dex"
+        ? "Dual-asset LP with LARI rewards, auto-compounding"
+        : "Leveraged HBARX staking via Bonzo Lend + Stader",
+    });
+  }
+ 
+  // Lending options
+  for (const m of markets) {
+    options.push({
+      type: "lending",
+      name: `Supply ${m.symbol}`,
+      apy: m.supplyAPY,
+      risk: m.symbol === "USDC" ? "low" : m.supplyAPY > 8 ? "high" : "medium",
+      protocol: "Bonzo Lend",
+      score: m.symbol === "USDC" && isSafe ? 85 : 60,
+      action: "lending_deposit",
+      params: { asset: m.symbol, amount: 100 },
+      description: `Supply to Bonzo Lend at ${m.supplyAPY.toFixed(2)}% APY, ${(m.utilizationRate || 0).toFixed(0)}% utilized`,
+    });
+  }
+ 
+  // Stader option
+  options.push({
+    type: "stader",
+    name: "HBARX Yield-on-Yield",
+    apy: 6.5,
+    risk: isSafe ? "medium" : "medium",
+    protocol: "Stader + Bonzo",
+    score: isSafe ? 70 : 80,
+    action: "stader_strategy",
+    params: { amount: 100 },
+    description: "Stake HBAR → HBARX (~2.5% staking) → Supply to Bonzo (+ lending APY)",
+  });
+ 
+  // Sort by score (risk-adjusted for safe, raw APY for aggressive)
+  if (isSafe) {
+    options.sort((a, b) => {
+      const riskScore = { low: 30, medium: 0, high: -20 };
+      const aScore = (a.score || 0) + (riskScore[a.risk as keyof typeof riskScore] || 0);
+      const bScore = (b.score || 0) + (riskScore[b.risk as keyof typeof riskScore] || 0);
+      return bScore - aScore;
+    });
+  } else {
+    options.sort((a, b) => b.apy - a.apy);
+  }
+ 
+  const topOptions = options.slice(0, 5);
+ 
+  return (
+    <div className="my-3 rounded-xl border border-gray-700/30 overflow-hidden" style={{ background: "rgba(17, 24, 39, 0.6)" }}>
+      {/* Header */}
+      <div className="px-4 py-3 border-b border-gray-800/50 flex items-center justify-between"
+        style={{ background: isSafe
+          ? "linear-gradient(135deg, rgba(16,185,129,0.1), rgba(59,130,246,0.06))"
+          : "linear-gradient(135deg, rgba(245,158,11,0.1), rgba(239,68,68,0.06))"
+        }}>
+        <div className="flex items-center gap-2">
+          <div className="w-8 h-8 rounded-lg flex items-center justify-center"
+            style={{ background: isSafe ? "rgba(16,185,129,0.15)" : "rgba(245,158,11,0.15)" }}>
+            <span className="text-base">{isSafe ? "🛡️" : "🚀"}</span>
+          </div>
+          <div>
+            <span className="text-sm font-semibold text-gray-200">
+              {isSafe ? "Safe Yield Recommendations" : "Max Yield Opportunities"}
+            </span>
+            <div className="flex items-center gap-2 mt-0.5">
+              <span className="text-[10px] text-gray-500">
+                {isSafe ? "Sorted by risk-adjusted score" : "Sorted by highest APY"}
+              </span>
+              {hbarPrice > 0 && (
+                <span className="text-[10px] text-gray-600">
+                  • HBAR: ${hbarPrice.toFixed(4)} (Pyth)
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+        <div className="text-[10px] px-2 py-1 rounded-full font-medium"
+          style={{
+            color: isSafe ? "#10b981" : "#f59e0b",
+            background: isSafe ? "rgba(16,185,129,0.1)" : "rgba(245,158,11,0.1)",
+            border: `1px solid ${isSafe ? "rgba(16,185,129,0.2)" : "rgba(245,158,11,0.2)"}`,
+          }}>
+          {topOptions.length} options found
+        </div>
+      </div>
+ 
+      {/* Options */}
+      <div className="p-3 space-y-2">
+        {topOptions.map((opt, i) => {
+          const risk = riskColors[opt.risk] || riskColors.medium;
+          const isSelected = selectedOption === i;
+          const isTop = i === 0;
+ 
+          return (
+            <div
+              key={opt.name + i}
+              className="rounded-xl overflow-hidden transition-all duration-200 cursor-pointer"
+              style={{
+                background: isSelected
+                  ? "rgba(16,185,129,0.08)"
+                  : isTop
+                  ? "rgba(139,92,246,0.05)"
+                  : "rgba(31,41,55,0.3)",
+                border: `1px solid ${
+                  isSelected ? "rgba(16,185,129,0.3)"
+                  : isTop ? "rgba(139,92,246,0.2)"
+                  : "rgba(55,65,81,0.2)"
+                }`,
+              }}
+              onClick={() => setSelectedOption(isSelected ? null : i)}
+            >
+              <div className="flex items-center justify-between px-3 py-2.5">
+                <div className="flex items-center gap-3">
+                  {/* Rank badge */}
+                  <div className="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 text-xs font-bold"
+                    style={{
+                      background: isTop ? "rgba(139,92,246,0.2)" : "rgba(55,65,81,0.3)",
+                      color: isTop ? "#a78bfa" : "#9ca3af",
+                    }}>
+                    #{i + 1}
+                  </div>
+ 
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-semibold text-gray-200">{opt.name}</span>
+                      {isTop && (
+                        <span className="text-[8px] px-1.5 py-0.5 rounded-full font-bold"
+                          style={{ color: "#a78bfa", background: "rgba(139,92,246,0.15)", border: "1px solid rgba(139,92,246,0.3)" }}>
+                          TOP PICK
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 mt-0.5">
+                      <span className="text-[10px] text-gray-500">{opt.protocol}</span>
+                      <span className="text-[10px] px-1.5 py-px rounded-full font-medium"
+                        style={{ color: risk.color, background: risk.bg, border: `1px solid ${risk.color}20` }}>
+                        {risk.label}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+ 
+                <div className="text-right flex-shrink-0">
+                  <div className="text-lg font-bold text-emerald-400">{opt.apy.toFixed(1)}%</div>
+                  <div className="text-[9px] text-gray-500">APY</div>
+                </div>
+              </div>
+ 
+              {/* Expanded details + action button */}
+              {isSelected && (
+                <div className="px-3 pb-3 pt-1 border-t border-gray-800/30 space-y-2">
+                  <p className="text-[11px] text-gray-400 leading-relaxed">{opt.description}</p>
+ 
+                  <div className="flex gap-2">
+                  {opt.type === "vault" && onAction && (() => {
+  const network = process.env.NEXT_PUBLIC_HEDERA_NETWORK || "testnet";
+  const isMainnet = network === "mainnet";
+  return (
+    <>
+      {isMainnet ? (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onAction("confirm_vault", {
+              action: "deposit",
+              vault: opt.name,
+              vaultId: opt.params.vaultId,
+              expectedApy: opt.apy.toFixed(1),
+              status: "preview",
+            });
+          }}
+          className="flex-1 text-xs font-medium py-2 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+          style={{
+            background: "rgba(16,185,129,0.15)",
+            border: "1px solid rgba(16,185,129,0.3)",
+            color: "#10b981",
+          }}
+        >
+          <span>⚡</span> Deposit into Vault
+        </button>
+      ) : (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            const wantToken = opt.name.split(" ")[0].replace("(paired", "").trim();
+            const asset = ["USDC", "HBAR", "SAUCE", "KARATE", "HBARX"].includes(wantToken) ? wantToken : "HBAR";
+            onAction("confirm_lending", {
+              action: "supply",
+              asset,
+              amount: 100,
+              currentApy: opt.apy.toFixed(2),
+              status: "preview",
+            });
+          }}
+          className="flex-1 text-xs font-medium py-2 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+          style={{
+            background: "rgba(59,130,246,0.15)",
+            border: "1px solid rgba(59,130,246,0.3)",
+            color: "#3b82f6",
+          }}
+        >
+          <span>🏦</span> Supply to Bonzo Lend
+        </button>
+      )}
+      {!isMainnet && (
+        <div className="w-full text-[9px] text-gray-600 text-center mt-1">
+          Vault contracts are mainnet-only. On testnet this supplies to Bonzo Lend instead.
+        </div>
+      )}
+    </>
+  );
+})()}
+ 
+                    {opt.type === "lending" && onAction && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onAction("confirm_lending", {
+                            action: "supply",
+                            asset: opt.params.asset,
+                            amount: opt.params.amount,
+                            currentApy: opt.apy.toFixed(2),
+                            status: "preview",
+                          });
+                        }}
+                        className="flex-1 text-xs font-medium py-2 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                        style={{
+                          background: "rgba(59,130,246,0.15)",
+                          border: "1px solid rgba(59,130,246,0.3)",
+                          color: "#3b82f6",
+                        }}
+                      >
+                        <span>🏦</span> Supply to Bonzo Lend
+                      </button>
+                    )}
+ 
+                    {opt.type === "stader" && onAction && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onAction("send_message", { message: "HBARX strategy with 100 HBAR" });
+                        }}
+                        className="flex-1 text-xs font-medium py-2 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                        style={{
+                          background: "rgba(6,182,212,0.15)",
+                          border: "1px solid rgba(6,182,212,0.3)",
+                          color: "#06b6d4",
+                        }}
+                      >
+                        <span>🔷</span> Execute HBARX Strategy
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+ 
+      {/* Footer */}
+      <div className="px-4 py-2 border-t border-gray-800/40 flex items-center justify-between text-[10px] text-gray-600">
+        <span>Click an option to see details and execute</span>
+        <span>Scanned {vaults.length} vaults + {markets.length} lending markets</span>
       </div>
     </div>
   );
