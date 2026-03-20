@@ -154,12 +154,29 @@ interface KeeperResult {
   sentiment: { score: number; signal: string; reasoning: string };
   portfolio: PortfolioData | null;
   execution: { executed: boolean; agentResponse?: string; error?: string };
-  hcsLog: {
+  hcsLog?: {
     logged: boolean;
     topicId?: string;
     sequenceNumber?: number;
     error?: string;
   };
+  evmAudit?: {
+    recorded: boolean;
+    decisionHash?: string;
+    txId?: string;
+    auditIndex?: number;
+    contractId?: string;
+    error?: string;
+  };
+  vksReward?: {
+    minted: boolean;
+    tokenId?: string;
+    txId?: string;
+    newBalance?: number;
+    error?: string;
+  };
+  agentsUsed?: string[];
+  dcaExecutions?: number;
   durationMs: number;
   timestamp: string;
 }
@@ -179,17 +196,16 @@ export default function Home() {
       id: "welcome",
       role: "assistant",
       content:
-        "Welcome to **VaultMind** — your Multi-Agent AI DeFi Keeper on Hedera.\n\n" +
-        "Powered by 4 specialized agents (Sentinel → Strategist → Auditor → Executor) with real-time Pyth oracle prices.\n\n" +
-        "**📊 Analytics**\n• \"Show my portfolio\" — pie chart\n• \"How's the market sentiment?\" — Fear & Greed + Pyth prices\n• \"Compare APYs across platforms\" — Bonzo vs SaucerSwap\n• \"Show Bonzo Vault APYs\" — 20 vault comparison\n• \"Show my positions\" — Bonzo Lend health factor\n• \"Show Bonzo markets\" — all reserves + rates\n• \"Show risk vs return\" / \"Show DeFi opportunities\" / \"Show correlation matrix\"\n\n" +
-        "**⚡ Keeper Engine**\n• \"Run dry run\" — multi-agent analysis without executing\n• \"Execute keeper\" — confirm + execute via Executor Agent\n• \"Start auto keeper\" / \"Stop auto keeper\" — DCA auto-executes too\n• \"Show decision history\" — past actions\n• \"Show audit log\" — HCS on-chain trail (multi-agent metadata)\n• \"Show last 5 DEPOSIT actions\" — filtered audit\n• \"Show first 3 entries\" — oldest first\n• \"Show only BORROW actions\" — type filter\n\n" +
+        "Welcome to **VaultMind** — your AI DeFi Keeper on Hedera. Every feature is controllable from this chat.\n\n" +
+        "**📊 Analytics**\n• \"Show my portfolio\" — pie chart\n• \"How's the market sentiment?\" — Fear & Greed\n• \"Compare APYs across platforms\" — Bonzo vs SaucerSwap\n• \"Show Bonzo Vault APYs\" — vault comparison\n• \"Show my positions\" — Bonzo Lend health factor\n• \"Show Bonzo markets\" — all reserves + rates\n• \"Show risk vs return\" / \"Show DeFi opportunities\" / \"Show correlation matrix\"\n\n" +
+        "**⚡ Keeper Engine**\n• \"Run dry run\" — analyze without executing\n• \"Execute keeper\" — confirm + execute\n• \"Start auto keeper\" / \"Stop auto keeper\"\n• \"Show decision history\" — past actions\n• \"Show audit log\" — HCS on-chain trail\n• \"Show last 5 DEPOSIT actions\" — filtered audit\n• \"Show first 3 entries\" — oldest first\n• \"Show only BORROW actions\" — type filter\n\n" +
         "**⚙️ Strategy Config**\n• \"Show strategy config\" — current parameters\n• \"Set bearish threshold to -25\" — adjust risk\n• \"Set confidence minimum to 70\" — require higher confidence\n• \"Set volatility exit to 75\" — tighten exit\n• \"Reset strategy to defaults\"\n\n" +
-        "**💰 Vault Actions (Real mainnet contracts)**\n• \"Deposit 100 HBAR into HBAR-USDC vault\"\n• \"Withdraw from USDC-USDT vault\"\n• \"Harvest SAUCE-HBAR vault now\" — earns caller fee\n• \"Switch vault to stable\"\n\n" +
+        "**💰 Vault Actions**\n• \"Deposit 100 HBAR into HBAR-USDC vault\"\n• \"Withdraw from USDC-USDT vault\"\n• \"Harvest SAUCE-HBAR vault now\"\n• \"Switch vault to stable\"\n\n" +
         "**🏦 Lending Actions**\n• \"Supply 500 HBAR to Bonzo\"\n• \"Borrow 200 USDC\"\n• \"Repay my USDC loan\"\n\n" +
         "**👛 Wallet**\n• \"Connect wallet 0.0.XXXXX\" / \"Disconnect wallet\"\n• \"Show my wallet\" — balance & tokens\n\n" +
-        "**📈 Research**\n• \"Show backtest\" — VaultMind vs HODL\n• \"Show price chart\" — OHLCV candlestick\n• \"I want safe yield on my HBAR\" — intent-based recommendation\n• \"I want maximum yield, I'm aggressive\"\n\n" +
-        "**📅 DCA (Auto-executes with Pyth prices)**\n• \"DCA 50 HBAR daily\" — set up recurring deposits\n• \"DCA 100 USDC weekly into Bonzo\" — weekly accumulation\n• \"Show DCA status\" / \"Cancel DCA\" / \"Cancel all DCA\"\n• \"Pause DCA\" / \"Resume DCA\"\n\n" +
-        "**🔷 Stader HBARX Strategy (Pyth-priced)**\n• \"HBARX strategy with 100 HBAR\" — stake→supply→borrow loop\n• \"Stake 50 HBAR with Stader\" — liquid staking only\n• \"Show HBARX info\" — exchange rate, APY & Pyth USD prices\n\n" +
+        "**📈 Research**\n• \"Show backtest\" — VaultMind vs HODL\n• \"Show price chart\" — OHLCV candlestick\n\n" +
+        "**📅 DCA (Dollar Cost Averaging)**\n• \"DCA 50 HBAR daily\" — set up recurring deposits\n• \"DCA 100 USDC weekly\" — weekly accumulation\n• \"Show DCA status\" / \"Cancel DCA\"\n• \"Pause DCA\" / \"Resume DCA\"\n\n" +
+        "**🔷 Stader HBARX Strategy**\n• \"HBARX strategy with 100 HBAR\" — full stake→supply loop\n• \"Stake 50 HBAR with Stader\" — liquid staking only\n• \"Show HBARX info\" — exchange rate & APY\n\n" +
         "**🛡️ Health Monitor**\n• \"Health check\" — position health + liquidation risk\n• \"Monitor positions\" — real-time tracking",
       timestamp: new Date(),
     },
@@ -310,7 +326,7 @@ export default function Home() {
         setKeeperResult(json.data);
         setKeeperHistory((prev) => [json.data, ...prev].slice(0, 20));
         if (json.data.hcsLog?.topicId && typeof window !== "undefined") {
-          localStorage.setItem("vaultmind_hcs_topic", json.data.hcsLog.topicId);
+          localStorage.setItem("vaultmind_hcs_topic", json.data.hcsLog?.topicId);
         }
         pulseCard("keeper");
         pulseCard("history");
@@ -479,7 +495,7 @@ export default function Home() {
         }
 
         if (json.data.hcsLog?.topicId && typeof window !== "undefined") {
-          localStorage.setItem("vaultmind_hcs_topic", json.data.hcsLog.topicId);
+          localStorage.setItem("vaultmind_hcs_topic", json.data.hcsLog?.topicId);
         }
       }
     } catch (err: any) {
@@ -1046,7 +1062,7 @@ export default function Home() {
             }
 
             if (d.hcsLog?.topicId && typeof window !== "undefined") {
-              localStorage.setItem("vaultmind_hcs_topic", d.hcsLog.topicId);
+              localStorage.setItem("vaultmind_hcs_topic", d.hcsLog?.topicId);
             }
 
             pulseCard("keeper");
@@ -1940,6 +1956,24 @@ export default function Home() {
                   <span className="text-gray-300">HCS On-Chain</span>
                 </div>
                 <div className="flex justify-between">
+                  <span className="text-gray-500">EVM Contract</span>
+                  <span className={keeperResult?.evmAudit?.recorded ? "text-emerald-400" : "text-gray-500"}>
+                    {keeperResult?.evmAudit?.contractId || "Not deployed"}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">VKS Token</span>
+                  <span className={keeperResult?.vksReward?.minted ? "text-purple-400" : "text-gray-500"}>
+                    {keeperResult?.vksReward?.tokenId || "Not created"}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Hedera Services</span>
+                  <span className="text-gray-300">
+                    HCS{keeperResult?.vksReward?.tokenId ? " + HTS" : ""}{keeperResult?.evmAudit?.contractId ? " + EVM" : ""}
+                  </span>
+                </div>
+                <div className="flex justify-between">
                   <span className="text-gray-500">Decisions logged</span>
                   <span className="text-gray-300">{keeperHistory.length}</span>
                 </div>
@@ -2456,11 +2490,11 @@ function KeeperPanel({
           <p className="text-[11px] text-gray-400 leading-relaxed">
             {result.decision.reason}
           </p>
-          <div className="flex items-center gap-3 text-[10px] text-gray-500">
+          <div className="flex items-center gap-3 text-[10px] text-gray-500 flex-wrap">
             <span>Confidence: {(result.decision.confidence * 100).toFixed(0)}%</span>
             <span>•</span>
             <span>{result.durationMs}ms</span>
-            {result.hcsLog.logged && (
+            {result.hcsLog?.logged && (
               <>
                 <span>•</span>
                 <span className="text-emerald-400 flex items-center gap-0.5">
@@ -2468,8 +2502,87 @@ function KeeperPanel({
                 </span>
               </>
             )}
+            {result.evmAudit?.recorded && (
+              <>
+                <span>•</span>
+                <span className="text-emerald-400 flex items-center gap-0.5">
+                  <CheckCircle className="w-3 h-3" /> EVM
+                </span>
+              </>
+            )}
+            {result.vksReward?.minted && (
+              <>
+                <span>•</span>
+                <span className="text-purple-400 flex items-center gap-0.5">
+                  +1 VKS
+                </span>
+              </>
+            )}
+            {result.agentsUsed && result.agentsUsed.length > 0 && (
+              <>
+                <span>•</span>
+                <span className="text-purple-400/60">{result.agentsUsed.join(" → ")}</span>
+              </>
+            )}
           </div>
-          {result.execution.executed && result.execution.agentResponse && (
+
+          {/* Hedera Services Status */}
+          {(result.evmAudit || result.vksReward) && (
+            <div className="space-y-1.5 pt-2 mt-2 border-t border-gray-800/40">
+              {result.evmAudit && (
+                <div className="flex items-center gap-2 text-[10px]">
+                  <span className={result.evmAudit.recorded ? "text-emerald-400" : "text-gray-600"}>
+                    {result.evmAudit.recorded ? "✓" : "✗"} EVM Audit
+                  </span>
+                  {result.evmAudit.recorded && result.evmAudit.decisionHash && (
+                    <code className="text-gray-500 font-mono text-[9px]">
+                      {result.evmAudit.decisionHash.substring(0, 14)}...
+                    </code>
+                  )}
+                  {result.evmAudit.contractId && (
+                    <a
+                      href={`https://hashscan.io/testnet/contract/${result.evmAudit.contractId}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-emerald-400/60 hover:text-emerald-400 ml-auto flex items-center gap-0.5"
+                    >
+                      Contract <ExternalLink className="w-2.5 h-2.5" />
+                    </a>
+                  )}
+                  {!result.evmAudit.recorded && result.evmAudit.error && (
+                    <span className="text-gray-600 ml-auto truncate max-w-[120px]">{result.evmAudit.error}</span>
+                  )}
+                </div>
+              )}
+              {result.vksReward && (
+                <div className="flex items-center gap-2 text-[10px]">
+                  <span className={result.vksReward.minted ? "text-purple-400" : "text-gray-600"}>
+                    {result.vksReward.minted ? "✓" : "✗"} VKS Reward
+                  </span>
+                  {result.vksReward.minted && (
+                    <span className="text-purple-300 font-medium">
+                      +1 VKS {result.vksReward.newBalance != null ? `(bal: ${result.vksReward.newBalance})` : ""}
+                    </span>
+                  )}
+                  {result.vksReward.tokenId && (
+                    <a
+                      href={`https://hashscan.io/testnet/token/${result.vksReward.tokenId}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-purple-400/60 hover:text-purple-400 ml-auto flex items-center gap-0.5"
+                    >
+                      Token <ExternalLink className="w-2.5 h-2.5" />
+                    </a>
+                  )}
+                  {!result.vksReward.minted && result.vksReward.error && (
+                    <span className="text-gray-600 ml-auto truncate max-w-[120px]">{result.vksReward.error}</span>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {result.execution?.executed && result.execution?.agentResponse && (
             <div className="mt-2 p-2.5 rounded-lg text-[11px] text-gray-400 border border-purple-900/20" style={{ background: "rgba(20, 16, 40, 0.5)" }}>
               <span className="text-purple-400 font-medium">Agent: </span>
               {result.execution.agentResponse.substring(0, 200)}
@@ -2492,8 +2605,8 @@ function KeeperPanel({
                 </span>
               </div>
               <p className="text-[10px] text-gray-400 leading-relaxed">
-                {result.vaultDecision.reason.substring(0, 150)}
-                {result.vaultDecision.reason.length > 150 ? "..." : ""}
+                {(result.vaultDecision.reason || "No reason provided").substring(0, 150)}
+                {(result.vaultDecision.reason || "").length > 150 ? "..." : ""}
               </p>
             </div>
           )}
@@ -2667,12 +2780,12 @@ function DecisionHistoryCard({ history }: { history: KeeperResult[] }) {
               <div className="flex items-center gap-2">
                 <span className="font-medium text-gray-300">{entry.decision.action}</span>
                 <span className="text-gray-600">{(entry.decision.confidence * 100).toFixed(0)}%</span>
-                {entry.hcsLog.logged && <CheckCircle className="w-3 h-3 text-emerald-400 flex-shrink-0" />}
+                {entry.hcsLog?.logged && <CheckCircle className="w-3 h-3 text-emerald-400 flex-shrink-0" />}
               </div>
               <p className="text-gray-500 truncate">{entry.decision.reason}</p>
               <span className="text-gray-600 text-[10px]">
                 {new Date(entry.timestamp).toLocaleTimeString()}
-                {entry.hcsLog.topicId && <> • Audit: {entry.hcsLog.topicId}</>}
+                {entry.hcsLog?.topicId && <> • Audit: {entry.hcsLog?.topicId}</>}
               </span>
             </div>
           </div>

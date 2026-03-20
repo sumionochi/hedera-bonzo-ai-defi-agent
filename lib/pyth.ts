@@ -1,9 +1,11 @@
 // ============================================
 // VaultMind — Pyth Network Price Feed Integration
 // ============================================
-// Pyth provides 400+ real-time price feeds on Hedera.
-// Uses the Hermes REST API for off-chain price retrieval
-// and on-chain Pyth contract for verification when needed.
+// Multi-layer price resolution:
+//   1. Pyth Hermes (primary, 10s cache)
+//   2. CoinGecko (fallback, 60s cache, handles 429)
+//   3. Last Known Good (never returns $0 if we ever had a price)
+//   4. Hardcoded reasonable defaults (absolute last resort)
 //
 // Docs: https://docs.pyth.network/price-feeds
 // Hermes API: https://hermes.pyth.network
@@ -14,12 +16,10 @@ import { defaultAbiCoder } from "@ethersproject/abi";
 import { getHederaClient } from "./hedera";
 
 // ═══════════════════════════════════════════════════════════
-// PYTH PRICE FEED IDS — from https://pyth.network/developers/price-feed-ids
-// These are the same across all chains (Pyth universal feed IDs)
+// PYTH PRICE FEED IDS
 // ═══════════════════════════════════════════════════════════
 
 export const PYTH_FEED_IDS: Record<string, string> = {
-  // Crypto
   "HBAR/USD":
     "0x3728e591a4b3e5404d14bcd1e4c0c50369515c459db31963a7e7e82e3c4a5e44",
   "BTC/USD":
@@ -32,14 +32,12 @@ export const PYTH_FEED_IDS: Record<string, string> = {
     "0xeaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a",
   "USDT/USD":
     "0x2b89b9dc8fdf9f34709a5b106b472f0f39bb6ca9ce04b0fd7f2e971688e2e53b",
-  // Hedera ecosystem tokens — use HBAR as proxy where direct feed unavailable
-  "SAUCE/USD": "", // No direct Pyth feed — derive from DEX
-  "HBARX/USD": "", // Derived: HBAR/USD * exchangeRate
-  "KARATE/USD": "", // No direct feed
+  "SAUCE/USD": "",
+  "HBARX/USD": "",
+  "KARATE/USD": "",
 };
 
-// Pyth contract on Hedera mainnet
-// Deployed by Pyth governance — verified address
+// Pyth contract on Hedera
 const PYTH_CONTRACT_MAINNET = "0xa2aa501b19aff244d90cc15a4cf739d2725b5729";
 const PYTH_CONTRACT_TESTNET = "0xa2aa501b19aff244d90cc15a4cf739d2725b5729";
 
@@ -51,7 +49,7 @@ const HEDERA_NETWORK =
 const PYTH_CONTRACT =
   HEDERA_NETWORK === "mainnet" ? PYTH_CONTRACT_MAINNET : PYTH_CONTRACT_TESTNET;
 
-// Hermes API — the recommended way to get Pyth prices off-chain
+// Hermes endpoints — public + beta
 const HERMES_URLS = [
   "https://hermes.pyth.network",
   "https://hermes-beta.pyth.network",
@@ -71,7 +69,7 @@ export interface PythPrice {
   emaPrice: number;
   emaConfidence: number;
   status: "trading" | "halted" | "unknown";
-  source: "hermes" | "on-chain" | "cached";
+  source: "hermes" | "on-chain" | "cached" | "coingecko" | "fallback";
 }
 
 export interface PythPriceBundle {
@@ -81,35 +79,75 @@ export interface PythPriceBundle {
 }
 
 // ═══════════════════════════════════════════════════════════
-// HERMES API — Primary price source (low latency, free)
+// MULTI-LAYER CACHE
 // ═══════════════════════════════════════════════════════════
 
-// Cache with 10s TTL
-let priceCache: PythPriceBundle | null = null;
-let priceCacheTs = 0;
-const PRICE_CACHE_TTL = 10_000; // 10s
+// Layer 1: Hermes cache (10s TTL — fast refresh)
+let hermesCache: PythPriceBundle | null = null;
+let hermesCacheTs = 0;
+const HERMES_CACHE_TTL = 10_000;
 
-/**
- * Fetch latest prices from Pyth Hermes API.
- * This is the recommended approach for off-chain price consumption.
- */
-export async function fetchPythPrices(
-  pairs: string[] = ["HBAR/USD", "BTC/USD", "ETH/USD", "USDC/USD"]
-): Promise<PythPriceBundle> {
-  const now = Date.now();
-  if (priceCache && now - priceCacheTs < PRICE_CACHE_TTL) {
-    return priceCache;
+// Layer 2: CoinGecko cache (60s TTL — avoid 429 rate limit)
+interface CoinGeckoCache {
+  hbar: number;
+  btc: number;
+  eth: number;
+  timestamp: number;
+}
+let cgCache: CoinGeckoCache | null = null;
+const CG_CACHE_TTL = 60_000; // 60s — CoinGecko free tier allows ~10-30 req/min
+
+// Layer 3: Last Known Good — NEVER expires, prevents $0 prices
+interface LastKnownGood {
+  hbar: number;
+  btc: number;
+  eth: number;
+  usdc: number;
+  timestamp: number;
+  source: string;
+}
+let lastKnownGood: LastKnownGood = {
+  hbar: 0.19, // reasonable default as of March 2026
+  btc: 84000,
+  eth: 2000,
+  usdc: 1.0,
+  timestamp: 0,
+  source: "default",
+};
+
+// Update last known good whenever we get real prices
+function updateLastKnownGood(
+  prices: Record<string, PythPrice>,
+  source: string
+) {
+  const hbar = prices["HBAR/USD"]?.price;
+  const btc = prices["BTC/USD"]?.price;
+  const eth = prices["ETH/USD"]?.price;
+  const usdc = prices["USDC/USD"]?.price;
+
+  if (hbar && hbar > 0.001) lastKnownGood.hbar = hbar;
+  if (btc && btc > 100) lastKnownGood.btc = btc;
+  if (eth && eth > 10) lastKnownGood.eth = eth;
+  if (usdc && usdc > 0.9 && usdc < 1.1) lastKnownGood.usdc = usdc;
+
+  if (hbar && hbar > 0.001) {
+    lastKnownGood.timestamp = Date.now();
+    lastKnownGood.source = source;
   }
+}
 
-  // Collect feed IDs for requested pairs
+// ═══════════════════════════════════════════════════════════
+// LAYER 1: HERMES API (Primary)
+// ═══════════════════════════════════════════════════════════
+
+async function fetchFromHermes(
+  pairs: string[]
+): Promise<Record<string, PythPrice> | null> {
   const feedIds = pairs
     .map((p) => PYTH_FEED_IDS[p])
     .filter((id) => id && id.length > 0);
 
-  if (feedIds.length === 0) {
-    console.warn("[Pyth] No valid feed IDs for requested pairs");
-    return { prices: {}, timestamp: now, source: "none" };
-  }
+  if (feedIds.length === 0) return null;
 
   for (const base of HERMES_URLS) {
     try {
@@ -170,19 +208,12 @@ export async function fetchPythPrices(
         }
       }
 
-      console.log(
-        `[Pyth] ✅ Got ${Object.keys(prices).length} prices from Hermes`
-      );
-
-      const bundle: PythPriceBundle = {
-        prices,
-        timestamp: now,
-        source: base,
-      };
-
-      priceCache = bundle;
-      priceCacheTs = now;
-      return bundle;
+      if (Object.keys(prices).length > 0) {
+        console.log(
+          `[Pyth] ✅ Got ${Object.keys(prices).length} prices from Hermes`
+        );
+        return prices;
+      }
     } catch (err: any) {
       console.warn(
         `[Pyth] Hermes ${base} error: ${err.message?.substring(0, 80)}`
@@ -190,26 +221,193 @@ export async function fetchPythPrices(
     }
   }
 
-  // Return cached if available
-  if (priceCache) {
-    console.log("[Pyth] Using cached prices (Hermes unavailable)");
-    return priceCache;
-  }
-
-  return { prices: {}, timestamp: now, source: "fallback" };
+  return null;
 }
 
-/**
- * Get a single price for a pair.
- */
+// ═══════════════════════════════════════════════════════════
+// LAYER 2: COINGECKO (Fallback, cached 60s)
+// ═══════════════════════════════════════════════════════════
+
+async function fetchFromCoinGecko(): Promise<CoinGeckoCache | null> {
+  const now = Date.now();
+
+  // Return cached if fresh (prevents 429)
+  if (cgCache && now - cgCache.timestamp < CG_CACHE_TTL) {
+    console.log("[Pyth] Using cached CoinGecko prices");
+    return cgCache;
+  }
+
+  try {
+    const res = await fetch(
+      "https://api.coingecko.com/api/v3/simple/price?ids=hedera-hashgraph,bitcoin,ethereum&vs_currencies=usd",
+      {
+        signal: AbortSignal.timeout(5000),
+        headers: { Accept: "application/json" },
+      }
+    );
+
+    if (res.status === 429) {
+      console.warn("[Pyth] CoinGecko 429 rate limited — using cached/fallback");
+      return cgCache; // Return stale cache, it's better than nothing
+    }
+
+    if (!res.ok) {
+      console.warn(`[Pyth] CoinGecko ${res.status}`);
+      return cgCache;
+    }
+
+    const data = await res.json();
+    const result: CoinGeckoCache = {
+      hbar: data["hedera-hashgraph"]?.usd || 0,
+      btc: data["bitcoin"]?.usd || 0,
+      eth: data["ethereum"]?.usd || 0,
+      timestamp: now,
+    };
+
+    // Only cache if we got real data
+    if (result.hbar > 0) {
+      cgCache = result;
+      console.log(
+        `[Pyth] ✅ CoinGecko: HBAR=$${result.hbar}, BTC=$${result.btc}`
+      );
+    }
+
+    return result;
+  } catch (err: any) {
+    console.warn(`[Pyth] CoinGecko error: ${err.message?.substring(0, 60)}`);
+    return cgCache; // Return stale cache on network error
+  }
+}
+
+function cgToPythPrices(cg: CoinGeckoCache): Record<string, PythPrice> {
+  const now = Math.floor(Date.now() / 1000);
+  const make = (pair: string, price: number): PythPrice => ({
+    feedId: PYTH_FEED_IDS[pair] || "",
+    pair,
+    price,
+    confidence: price * 0.005, // ~0.5% confidence band
+    expo: -8,
+    publishTime: now,
+    emaPrice: price,
+    emaConfidence: price * 0.005,
+    status: "trading",
+    source: "coingecko",
+  });
+
+  const prices: Record<string, PythPrice> = {};
+  if (cg.hbar > 0) prices["HBAR/USD"] = make("HBAR/USD", cg.hbar);
+  if (cg.btc > 0) prices["BTC/USD"] = make("BTC/USD", cg.btc);
+  if (cg.eth > 0) prices["ETH/USD"] = make("ETH/USD", cg.eth);
+  prices["USDC/USD"] = make("USDC/USD", 1.0);
+  return prices;
+}
+
+// ═══════════════════════════════════════════════════════════
+// LAYER 3: LAST KNOWN GOOD (never returns $0)
+// ═══════════════════════════════════════════════════════════
+
+function lastKnownGoodPrices(): Record<string, PythPrice> {
+  const now = Math.floor(Date.now() / 1000);
+  const ageMinutes = lastKnownGood.timestamp
+    ? Math.floor((Date.now() - lastKnownGood.timestamp) / 60000)
+    : -1;
+
+  console.warn(
+    `[Pyth] ⚠️ Using last known good prices (${lastKnownGood.source}, ${
+      ageMinutes >= 0 ? `${ageMinutes}m old` : "defaults"
+    })`
+  );
+
+  const make = (pair: string, price: number): PythPrice => ({
+    feedId: PYTH_FEED_IDS[pair] || "",
+    pair,
+    price,
+    confidence: price * 0.01, // 1% confidence — stale data
+    expo: -8,
+    publishTime: now,
+    emaPrice: price,
+    emaConfidence: price * 0.01,
+    status: "unknown",
+    source: "cached",
+  });
+
+  return {
+    "HBAR/USD": make("HBAR/USD", lastKnownGood.hbar),
+    "BTC/USD": make("BTC/USD", lastKnownGood.btc),
+    "ETH/USD": make("ETH/USD", lastKnownGood.eth),
+    "USDC/USD": make("USDC/USD", lastKnownGood.usdc),
+  };
+}
+
+// ═══════════════════════════════════════════════════════════
+// MAIN FETCH — Cascading fallback
+// ═══════════════════════════════════════════════════════════
+
+export async function fetchPythPrices(
+  pairs: string[] = ["HBAR/USD", "BTC/USD", "ETH/USD", "USDC/USD"]
+): Promise<PythPriceBundle> {
+  const now = Date.now();
+
+  // Check Hermes cache first
+  if (hermesCache && now - hermesCacheTs < HERMES_CACHE_TTL) {
+    return hermesCache;
+  }
+
+  // Layer 1: Try Hermes
+  const hermesPrices = await fetchFromHermes(pairs);
+  if (hermesPrices && Object.keys(hermesPrices).length > 0) {
+    // Validate prices — reject if HBAR is $0 or obviously wrong
+    const hbarPrice = hermesPrices["HBAR/USD"]?.price || 0;
+    if (hbarPrice > 0.001) {
+      updateLastKnownGood(hermesPrices, "hermes");
+      const bundle: PythPriceBundle = {
+        prices: hermesPrices,
+        timestamp: now,
+        source: "hermes",
+      };
+      hermesCache = bundle;
+      hermesCacheTs = now;
+      return bundle;
+    } else {
+      console.warn(
+        `[Pyth] Hermes returned suspicious HBAR price: $${hbarPrice} — falling back`
+      );
+    }
+  }
+
+  // Layer 2: Try CoinGecko
+  const cgData = await fetchFromCoinGecko();
+  if (cgData && cgData.hbar > 0.001) {
+    const cgPrices = cgToPythPrices(cgData);
+    updateLastKnownGood(cgPrices, "coingecko");
+    const bundle: PythPriceBundle = {
+      prices: cgPrices,
+      timestamp: now,
+      source: "coingecko",
+    };
+    // Don't overwrite hermes cache — CG is lower quality
+    // But do return it
+    return bundle;
+  }
+
+  // Layer 3: Last Known Good (never $0)
+  const fallbackPrices = lastKnownGoodPrices();
+  return {
+    prices: fallbackPrices,
+    timestamp: now,
+    source: `fallback (${lastKnownGood.source})`,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════
+// SINGLE PRICE HELPERS
+// ═══════════════════════════════════════════════════════════
+
 export async function getPythPrice(pair: string): Promise<number> {
   const bundle = await fetchPythPrices([pair]);
   return bundle.prices[pair]?.price || 0;
 }
 
-/**
- * Get HBAR price specifically — most commonly needed.
- */
 export async function getHbarPrice(): Promise<{
   price: number;
   confidence: number;
@@ -219,7 +417,7 @@ export async function getHbarPrice(): Promise<{
   const bundle = await fetchPythPrices(["HBAR/USD"]);
   const hbar = bundle.prices["HBAR/USD"];
 
-  if (hbar) {
+  if (hbar && hbar.price > 0.001) {
     return {
       price: hbar.price,
       confidence: hbar.confidence,
@@ -228,62 +426,36 @@ export async function getHbarPrice(): Promise<{
     };
   }
 
-  // Fallback: try CoinGecko-style endpoint
-  try {
-    const res = await fetch(
-      "https://api.coingecko.com/api/v3/simple/price?ids=hedera-hashgraph&vs_currencies=usd",
-      { signal: AbortSignal.timeout(3000) }
-    );
-    if (res.ok) {
-      const data = await res.json();
-      const price = data["hedera-hashgraph"]?.usd || 0;
-      return { price, confidence: 0, emaPrice: price, source: "coingecko" };
-    }
-  } catch {}
-
-  return { price: 0, confidence: 0, emaPrice: 0, source: "unavailable" };
+  // Absolute fallback — return last known good, never $0
+  return {
+    price: lastKnownGood.hbar,
+    confidence: lastKnownGood.hbar * 0.01,
+    emaPrice: lastKnownGood.hbar,
+    source: `fallback (${lastKnownGood.source})`,
+  };
 }
 
-/**
- * Derive HBARX price from HBAR price and Stader exchange rate.
- */
 export async function getHbarxPrice(
   staderExchangeRate: number
 ): Promise<number> {
   const hbar = await getHbarPrice();
   if (!hbar.price || !staderExchangeRate) return 0;
-  // HBARX represents staked HBAR at a growing rate
-  // 1 HBARX = (1 / exchangeRate) HBAR
-  // So HBARX price = HBAR price / exchangeRate
   return hbar.price / staderExchangeRate;
 }
 
 // ═══════════════════════════════════════════════════════════
-// ON-CHAIN PYTH QUERY (for verification / smart contract use)
+// ON-CHAIN PYTH QUERY
 // ═══════════════════════════════════════════════════════════
 
-const PYTH_ABI_GET_PRICE = [
-  "function getPriceUnsafe(bytes32 id) view returns (tuple(int64 price, uint64 conf, int32 expo, uint256 publishTime))",
-  "function getPriceNoOlderThan(bytes32 id, uint256 age) view returns (tuple(int64 price, uint64 conf, int32 expo, uint256 publishTime))",
-];
-
-/**
- * Query Pyth price directly on-chain via Hedera contract call.
- * Use this when you need verified on-chain pricing (e.g., for liquidation checks).
- */
 export async function getPythPriceOnChain(
   pair: string
 ): Promise<PythPrice | null> {
   const feedId = PYTH_FEED_IDS[pair];
-  if (!feedId) {
-    console.warn(`[Pyth] No feed ID for pair: ${pair}`);
-    return null;
-  }
+  if (!feedId) return null;
 
   try {
     const client = getHederaClient();
-    // getPriceUnsafe(bytes32) — returns latest cached price
-    const selector = "0xd47eed45"; // keccak256("getPriceUnsafe(bytes32)")
+    const selector = "0xd47eed45";
     const feedIdBytes = feedId.replace("0x", "").padStart(64, "0");
     const calldata = selector + feedIdBytes;
 
@@ -302,25 +474,26 @@ export async function getPythPriceOnChain(
       );
 
       const rawPrice = Number(decoded[0]);
-      const rawConf = Number(decoded[1]);
       const expo = Number(decoded[2]);
-      const publishTime = Number(decoded[3]);
-
       const price = rawPrice * Math.pow(10, expo);
+      const rawConf = Number(decoded[1]);
       const confidence = rawConf * Math.pow(10, expo);
 
-      return {
-        feedId,
-        pair,
-        price,
-        confidence,
-        expo,
-        publishTime,
-        emaPrice: price,
-        emaConfidence: confidence,
-        status: "trading",
-        source: "on-chain",
-      };
+      // Validate on-chain price too
+      if (price > 0.001 || pair !== "HBAR/USD") {
+        return {
+          feedId,
+          pair,
+          price,
+          confidence,
+          expo,
+          publishTime: Number(decoded[3]),
+          emaPrice: price,
+          emaConfidence: confidence,
+          status: "trading",
+          source: "on-chain",
+        };
+      }
     }
   } catch (err: any) {
     console.warn(
@@ -335,13 +508,9 @@ export async function getPythPriceOnChain(
 }
 
 // ═══════════════════════════════════════════════════════════
-// PRICE UPDATE DATA (for on-chain transactions needing fresh prices)
+// PRICE UPDATE DATA (for on-chain transactions)
 // ═══════════════════════════════════════════════════════════
 
-/**
- * Get Pyth price update data (VAA) for on-chain consumption.
- * This is needed when calling contracts that require a Pyth price update.
- */
 export async function getPriceUpdateData(
   pairs: string[]
 ): Promise<string[] | null> {
@@ -374,7 +543,7 @@ export async function getPriceUpdateData(
 }
 
 // ═══════════════════════════════════════════════════════════
-// MULTI-PRICE HELPER (for keeper/agent context)
+// MULTI-PRICE HELPER
 // ═══════════════════════════════════════════════════════════
 
 export interface MarketPrices {
@@ -389,10 +558,6 @@ export interface MarketPrices {
   timestamp: number;
 }
 
-/**
- * Get all relevant market prices in a single call.
- * Used by the keeper/agent for market context.
- */
 export async function getAllMarketPrices(
   staderExchangeRate?: number
 ): Promise<MarketPrices> {
@@ -404,16 +569,16 @@ export async function getAllMarketPrices(
   ]);
 
   const hbar = bundle.prices["HBAR/USD"];
-  const hbarPrice = hbar?.price || 0;
+  const hbarPrice = hbar?.price || lastKnownGood.hbar;
   const hbarxPrice =
     staderExchangeRate && hbarPrice ? hbarPrice / staderExchangeRate : 0;
 
   return {
     hbar: hbarPrice,
-    hbarConfidence: hbar?.confidence || 0,
-    hbarEma: hbar?.emaPrice || 0,
-    btc: bundle.prices["BTC/USD"]?.price || 0,
-    eth: bundle.prices["ETH/USD"]?.price || 0,
+    hbarConfidence: hbar?.confidence || hbarPrice * 0.005,
+    hbarEma: hbar?.emaPrice || hbarPrice,
+    btc: bundle.prices["BTC/USD"]?.price || lastKnownGood.btc,
+    eth: bundle.prices["ETH/USD"]?.price || lastKnownGood.eth,
     usdc: bundle.prices["USDC/USD"]?.price || 1.0,
     hbarx: hbarxPrice,
     source: bundle.source,

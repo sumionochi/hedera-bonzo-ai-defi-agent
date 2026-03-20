@@ -4,11 +4,12 @@
 // Now powered by the multi-agent architecture:
 //   Sentinel → Strategist → Auditor → Executor → Auditor
 //
-// This file serves as the backward-compatible wrapper.
-// The real logic lives in lib/agents/*.
+// Post-execution steps:
+//   5. Record decision hash on VaultMindAudit.sol (EVM)
+//   6. Mint 1 VKS token to user (HTS)
+//   7. Run DCA auto-tick
 //
-// DCA AUTO-LOOP: Integrated into every keeper tick so DCA
-// plans execute automatically when auto-keeper is running.
+// Hedera services used: HCS + HTS + EVM + DeFi contracts
 // ============================================
 
 import {
@@ -91,6 +92,23 @@ export interface KeeperCycleResult {
     logged: boolean;
     topicId?: string;
     sequenceNumber?: number;
+    error?: string;
+  };
+  // EVM audit contract result
+  evmAudit: {
+    recorded: boolean;
+    decisionHash?: string;
+    txId?: string;
+    auditIndex?: number;
+    contractId?: string;
+    error?: string;
+  };
+  // HTS VKS reward minting result
+  vksReward: {
+    minted: boolean;
+    tokenId?: string;
+    txId?: string;
+    newBalance?: number;
     error?: string;
   };
   // Multi-agent fields
@@ -369,13 +387,110 @@ export async function executeDecision(
   }
 }
 
+// ── Step 5: EVM Audit — record decision hash on smart contract ──
+
+async function recordEVMAudit(
+  decision: KeeperDecision,
+  sentiment: SentimentResult | null,
+  hcsLog: KeeperCycleResult["hcsLog"]
+): Promise<KeeperCycleResult["evmAudit"]> {
+  try {
+    const { recordDecisionOnChain, getAuditContractInfo } = await import(
+      "./evm-audit"
+    );
+
+    const payload = {
+      action: decision.action,
+      reason: decision.reason,
+      confidence: decision.confidence,
+      timestamp: decision.timestamp,
+      sentimentScore: sentiment?.score,
+      hcsTopicId: hcsLog?.topicId,
+      hcsSeqNum: hcsLog?.sequenceNumber,
+    };
+
+    const result = await recordDecisionOnChain(payload);
+    const info = getAuditContractInfo();
+
+    if (result.success) {
+      console.log(
+        `[Keeper] ✅ EVM audit: hash ${result.decisionHash?.substring(
+          0,
+          18
+        )}... → contract ${info.contractId}`
+      );
+    } else {
+      console.warn(`[Keeper] ⚠️ EVM audit failed: ${result.error}`);
+    }
+
+    return {
+      recorded: result.success,
+      decisionHash: result.decisionHash,
+      txId: result.txId,
+      auditIndex: result.auditIndex,
+      contractId: info.contractId || undefined,
+      error: result.success ? undefined : result.error,
+    };
+  } catch (e: any) {
+    console.warn(`[Keeper] EVM audit skipped: ${e.message?.substring(0, 60)}`);
+    return { recorded: false, error: e.message };
+  }
+}
+
+// ── Step 6: HTS Reward — mint 1 VKS token to user ──
+
+async function mintVKSReward(
+  decision: KeeperDecision,
+  accountId: string | undefined
+): Promise<KeeperCycleResult["vksReward"]> {
+  if (!accountId) {
+    return { minted: false, error: "No account ID" };
+  }
+
+  try {
+    const { mintKeeperReward } = await import("./hts-rewards");
+
+    const result = await mintKeeperReward(
+      accountId,
+      decision.action,
+      decision.confidence
+    );
+
+    if (result.success) {
+      console.log(
+        `[Keeper] ✅ Minted 1 VKS → ${accountId} (balance: ${result.newBalance})`
+      );
+    } else {
+      console.warn(`[Keeper] ⚠️ VKS mint failed: ${result.error}`);
+    }
+
+    return {
+      minted: result.success,
+      tokenId: result.tokenId,
+      txId: result.mintTxId || result.transferTxId,
+      newBalance: result.newBalance,
+      error: result.success ? undefined : result.error,
+    };
+  } catch (e: any) {
+    console.warn(`[Keeper] VKS mint skipped: ${e.message?.substring(0, 60)}`);
+    return { minted: false, error: e.message };
+  }
+}
+
 // ── Full Keeper Cycle (Multi-Agent Powered) ────────────────
 
 /**
  * Run one complete keeper cycle using the multi-agent architecture.
- * Also automatically runs DCA tick to execute any due plans.
  *
- * Pipeline: Sentinel → Strategist → Auditor → Executor → Auditor
+ * Pipeline:
+ *   1. Sentinel gathers market intel (Pyth + sentiment + Bonzo + Stader)
+ *   2. Strategist formulates action plan with confidence scores
+ *   3. Auditor pre-flight risk checks
+ *   4. Executor runs approved actions on-chain
+ *   5. Auditor logs decisions to HCS
+ *   6. Record decision hash on VaultMindAudit.sol (EVM)    ← NEW
+ *   7. Mint 1 VKS token to user (HTS)                      ← NEW
+ *   8. DCA auto-tick executes due plans
  */
 export async function runKeeperCycle(
   config: StrategyConfig = DEFAULT_STRATEGY,
@@ -390,17 +505,10 @@ export async function runKeeperCycle(
   console.log(`[Keeper] Execute mode: ${executeActions ? "LIVE" : "DRY-RUN"}`);
 
   try {
-    // Run the full multi-agent cycle
+    // ── Steps 1-5: Multi-agent pipeline (Sentinel → Strategist → Auditor → Executor → HCS) ──
     const multiResult = await runMultiAgentCycle(config, executeActions);
 
-    // Also run DCA tick if execution is enabled
-    let dcaCount = multiResult.dcaExecutions;
-    if (executeActions) {
-      const dcaTick = await runDCATick();
-      dcaCount += dcaTick.executed;
-    }
-
-    // Map multi-agent result to legacy KeeperCycleResult format
+    // Map multi-agent result to legacy format
     const topAction = multiResult.strategy.actions[0];
     const actionMap: Record<string, KeeperAction> = {
       LEND_DEPOSIT: "INCREASE_POSITION",
@@ -445,7 +553,7 @@ export async function runKeeperCycle(
       },
     };
 
-    // Extract vault decision from strategy
+    // Vault decision
     const vaultAction = multiResult.strategy.actions.find((a) =>
       a.type.startsWith("VAULT_")
     );
@@ -458,13 +566,13 @@ export async function runKeeperCycle(
         }
       : null;
 
-    // HCS log status
+    // HCS log from auditor
     const hcsEntry = multiResult.auditEntries.find(
       (e) => e.phase === "decision"
     );
     const hcsLog = hcsEntry?.hcsLog || { logged: false, error: "Not logged" };
 
-    // Execution status
+    // Execution from executor
     const execReport = multiResult.executions[0];
     const execution = execReport
       ? {
@@ -484,6 +592,29 @@ export async function runKeeperCycle(
             : `[DRY RUN] Would execute: ${decision.action}`,
         };
 
+    // ── Step 6: Record decision hash on EVM smart contract ──
+    const evmAudit = await recordEVMAudit(decision, sentiment, hcsLog);
+
+    // ── Step 7: Mint 1 VKS token to user ──
+    const vksReward = await mintVKSReward(decision, accountId);
+
+    // ── Step 8: DCA auto-tick ──
+    let dcaCount = multiResult.dcaExecutions;
+    if (executeActions) {
+      try {
+        const dcaTick = await runDCATick();
+        dcaCount += dcaTick.executed;
+      } catch {}
+    }
+
+    const durationMs = Date.now() - startTime;
+    console.log(
+      `[Keeper] Cycle complete in ${durationMs}ms — EVM: ${
+        evmAudit.recorded ? "✅" : "⚠️"
+      }, VKS: ${vksReward.minted ? "✅" : "⚠️"}`
+    );
+    console.log("[Keeper] ═══════════════════════════════════════");
+
     return {
       decision,
       sentiment,
@@ -491,23 +622,23 @@ export async function runKeeperCycle(
       markets: multiResult.intel.lendMarkets,
       execution,
       hcsLog,
+      evmAudit,
+      vksReward,
       vaultDecision,
       dcaExecutions: dcaCount,
       agentsUsed: multiResult.agentsUsed,
       multiAgentResult: multiResult,
       timestamp: multiResult.timestamp,
-      durationMs: Date.now() - startTime,
+      durationMs,
     };
   } catch (error: any) {
     console.error(`[Keeper] Multi-agent cycle failed: ${error.message}`);
-
-    // Fallback: run legacy single-agent cycle
     console.log("[Keeper] Falling back to legacy single-agent cycle...");
     return runLegacyKeeperCycle(config, executeActions, startTime);
   }
 }
 
-// ── Legacy fallback (in case multi-agent pipeline fails) ───
+// ── Legacy fallback ────────────────────────────────────────
 
 async function runLegacyKeeperCycle(
   config: StrategyConfig,
@@ -549,6 +680,8 @@ async function runLegacyKeeperCycle(
       markets,
       execution: { executed: false, error: "No sentiment data" },
       hcsLog: { logged: false, error: "Skipped" },
+      evmAudit: { recorded: false, error: "Skipped — no sentiment" },
+      vksReward: { minted: false, error: "Skipped — no sentiment" },
       agentsUsed: ["legacy"],
       timestamp: new Date().toISOString(),
       durationMs: Date.now() - startTime,
@@ -567,7 +700,7 @@ async function runLegacyKeeperCycle(
     };
   }
 
-  // Also run DCA tick
+  // DCA tick
   if (executeActions) {
     try {
       await runDCATick();
@@ -601,6 +734,10 @@ async function runLegacyKeeperCycle(
     hcsLog = { logged: false, error: err.message };
   }
 
+  // EVM audit + VKS reward (even in legacy mode)
+  const evmAudit = await recordEVMAudit(decision, sentiment, hcsLog);
+  const vksReward = await mintVKSReward(decision, accountId);
+
   return {
     decision,
     sentiment,
@@ -608,13 +745,15 @@ async function runLegacyKeeperCycle(
     markets,
     execution,
     hcsLog,
+    evmAudit,
+    vksReward,
     agentsUsed: ["legacy"],
     timestamp: new Date().toISOString(),
     durationMs: Date.now() - startTime,
   };
 }
 
-// Re-export vault types for API compatibility
+// Re-export vault types
 export {
   makeVaultDecision,
   getVaultsWithLiveData,

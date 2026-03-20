@@ -1,20 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import { runKeeperCycle, type StrategyConfig } from "@/lib/keeper";
-import { runMultiAgentCycle, runDCATick } from "@/lib/agents/orchestrator";
+import {
+  getVaultsWithLiveData,
+  makeVaultDecision,
+  type VaultKeeperContext,
+} from "@/lib/bonzo-vaults";
+import { analyzeSentiment } from "@/lib/sentiment";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 /**
- * GET /api/keeper — Run a multi-agent keeper cycle (dry-run by default)
+ * GET /api/keeper — Run a keeper cycle (dry-run by default)
  * Query params:
- *   ?execute=true — Actually execute decisions (default: false)
- *   ?mode=full|dca|lend|vault — Which subsystem to run (default: full)
- *
- * The multi-agent pipeline:
- *   Sentinel → Strategist → Auditor → Executor → Auditor
- *
- * DCA plans are automatically checked and executed every cycle.
+ *   ?execute=true — Actually execute the decision (default: false)
+ *   ?mode=lend|vault|full — Which keeper to run (default: full)
  */
 export async function GET(req: NextRequest) {
   const execute = req.nextUrl.searchParams.get("execute") === "true";
@@ -25,104 +25,64 @@ export async function GET(req: NextRequest) {
       `[API/keeper] Running multi-agent cycle (execute: ${execute}, mode: ${mode})...`
     );
 
-    // DCA-only mode (lightweight, for frequent polling)
-    if (mode === "dca") {
-      const dcaResult = await runDCATick();
-      return NextResponse.json({
-        success: true,
-        data: {
-          mode: "dca",
-          dcaExecutions: dcaResult.executed,
-          results: dcaResult.results,
-          timestamp: new Date().toISOString(),
-        },
-      });
-    }
+    // Run the multi-agent keeper cycle
+    const lendResult =
+      mode !== "vault" ? await runKeeperCycle(undefined, execute) : null;
 
-    // Full multi-agent cycle
-    const result = await runMultiAgentCycle(undefined, execute);
+    // Run vault keeper separately if needed
+    let vaultDecision = lendResult?.vaultDecision || null;
+    if (!vaultDecision && mode !== "lend") {
+      try {
+        const [vaults, sentiment] = await Promise.all([
+          getVaultsWithLiveData(),
+          analyzeSentiment(),
+        ]);
+        const ctx: VaultKeeperContext = {
+          vaults,
+          sentimentScore: sentiment.score,
+          volatility: sentiment.dataPoints.volatility,
+          hbarPrice: sentiment.dataPoints.hbarPrice,
+          fearGreedIndex: sentiment.dataPoints.fearGreedValue,
+          userHbarBalance: 1000,
+          userPositions: [],
+        };
+        vaultDecision = makeVaultDecision(ctx);
+      } catch (e: any) {
+        console.warn("[API/keeper] Vault decision error:", e.message);
+      }
+    }
 
     return NextResponse.json({
       success: true,
       data: {
-        // Strategy decision
-        decision: {
-          action: result.strategy.actions[0]?.type || "HOLD",
-          reason: result.strategy.actions[0]?.reasoning || "No action needed",
-          confidence: result.strategy.actions[0]?.confidence || 0.5,
-          allActions: result.strategy.actions.map((a) => ({
-            type: a.type,
-            priority: a.priority,
-            confidence: a.confidence,
-            description: a.description,
-          })),
-          overallStrategy: result.strategy.overallStrategy,
-          riskAssessment: result.strategy.riskAssessment,
-        },
-
-        // Sentinel intelligence
-        sentiment: result.intel.sentiment
+        decision: lendResult?.decision || null,
+        sentiment: lendResult
           ? {
-              score: result.intel.sentiment.score,
-              signal: result.intel.sentiment.signal,
-              confidence: result.intel.sentiment.confidence,
-              reasoning: result.intel.sentiment.reasoning,
+              score: lendResult.sentiment.score,
+              signal: lendResult.sentiment.signal,
+              confidence: lendResult.sentiment.confidence,
+              reasoning: lendResult.sentiment.reasoning,
             }
           : null,
-        prices: {
-          hbar: result.intel.prices.hbar,
-          hbarConfidence: result.intel.prices.hbarConfidence,
-          btc: result.intel.prices.btc,
-          eth: result.intel.prices.eth,
-          hbarx: result.intel.prices.hbarx,
-          source: result.intel.prices.source,
-        },
-        signals: result.intel.signals,
-
-        // Portfolio
-        portfolio: result.portfolio
+        portfolio: lendResult?.portfolio
           ? {
-              positions: result.portfolio.positions,
-              totalSuppliedUSD: result.portfolio.totalSuppliedUSD,
-              totalBorrowedUSD: result.portfolio.totalBorrowedUSD,
-              netWorthUSD: result.portfolio.netWorthUSD,
-              healthFactor: result.portfolio.healthFactor,
-              averageNetAPY: result.portfolio.averageNetAPY,
+              positions: lendResult.portfolio.positions,
+              totalSuppliedUSD: lendResult.portfolio.totalSuppliedUSD,
+              totalBorrowedUSD: lendResult.portfolio.totalBorrowedUSD,
+              netWorthUSD: lendResult.portfolio.netWorthUSD,
+              healthFactor: lendResult.portfolio.healthFactor,
+              averageNetAPY: lendResult.portfolio.averageNetAPY,
             }
           : null,
-
-        // Vault decision
-        vaultDecision:
-          result.strategy.actions.find((a) => a.type.startsWith("VAULT_")) ||
-          null,
-
-        // Execution results
-        executions: result.executions.map((e) => ({
-          action: e.action.type,
-          success: e.result.success,
-          details: e.result.details,
-          txIds: e.result.txIds,
-          durationMs: e.durationMs,
-        })),
-
-        // Audit
-        hcsLog: result.auditEntries.find((e) => e.phase === "decision")
-          ?.hcsLog || { logged: false },
-        riskChecks: result.riskChecks.map((rc) => ({
-          action: rc.action.type,
-          approved: rc.check.approved,
-          warnings: rc.check.warnings,
-          blocks: rc.check.blocks,
-          riskScore: rc.check.riskScore,
-        })),
-
-        // DCA
-        dcaExecutions: result.dcaExecutions,
-
-        // Meta
-        agentsUsed: result.agentsUsed,
-        durationMs: result.durationMs,
-        timestamp: result.timestamp,
+        execution: lendResult?.execution || null,
+        hcsLog: lendResult?.hcsLog || null,
+        evmAudit: lendResult?.evmAudit || null,
+        vksReward: lendResult?.vksReward || null,
+        vaultDecision,
+        agentsUsed: lendResult?.agentsUsed || [],
+        dcaExecutions: lendResult?.dcaExecutions || 0,
+        durationMs: lendResult?.durationMs || 0,
+        timestamp: lendResult?.timestamp || new Date().toISOString(),
       },
     });
   } catch (error: any) {
@@ -144,7 +104,7 @@ export async function POST(req: NextRequest) {
     const execute = body.execute === true;
     const customConfig: Partial<StrategyConfig> | undefined = body.config;
 
-    const config: Partial<StrategyConfig> = {
+    const config: StrategyConfig = {
       bearishThreshold: customConfig?.bearishThreshold ?? -30,
       bullishThreshold: customConfig?.bullishThreshold ?? 50,
       confidenceMinimum: customConfig?.confidenceMinimum ?? 0.6,
@@ -155,46 +115,58 @@ export async function POST(req: NextRequest) {
     };
 
     console.log(
-      `[API/keeper] Custom multi-agent cycle (execute: ${execute})`,
-      config
+      `[API/keeper] Running multi-agent cycle (execute: ${execute}, mode: full)...`
     );
 
-    const result = await runMultiAgentCycle(config, execute);
+    // Run both keepers in parallel
+    const [lendResult, vaultResult] = await Promise.all([
+      runKeeperCycle(config, execute),
+      (async () => {
+        try {
+          const [vaults, sentiment] = await Promise.all([
+            getVaultsWithLiveData(),
+            analyzeSentiment(),
+          ]);
+          const ctx: VaultKeeperContext = {
+            vaults,
+            sentimentScore: sentiment.score,
+            volatility: sentiment.dataPoints.volatility,
+            hbarPrice: sentiment.dataPoints.hbarPrice,
+            fearGreedIndex: sentiment.dataPoints.fearGreedValue,
+            userHbarBalance: 1000,
+            userPositions: [],
+          };
+          return makeVaultDecision(ctx);
+        } catch (e: any) {
+          console.warn("[API/keeper] Vault decision error:", e.message);
+          return null;
+        }
+      })(),
+    ]);
+
+    // Use multi-agent vault decision if available, fallback to standalone
+    const vaultDecision = lendResult.vaultDecision || vaultResult;
 
     return NextResponse.json({
       success: true,
       data: {
-        decision: {
-          action: result.strategy.actions[0]?.type || "HOLD",
-          reason: result.strategy.actions[0]?.reasoning || "No action needed",
-          confidence: result.strategy.actions[0]?.confidence || 0.5,
-          overallStrategy: result.strategy.overallStrategy,
+        decision: lendResult.decision,
+        sentiment: {
+          score: lendResult.sentiment.score,
+          signal: lendResult.sentiment.signal,
+          confidence: lendResult.sentiment.confidence,
+          reasoning: lendResult.sentiment.reasoning,
         },
-        sentiment: result.intel.sentiment
-          ? {
-              score: result.intel.sentiment.score,
-              signal: result.intel.sentiment.signal,
-              confidence: result.intel.sentiment.confidence,
-              reasoning: result.intel.sentiment.reasoning,
-            }
-          : null,
-        prices: result.intel.prices,
-        signals: result.intel.signals,
-        portfolio: result.portfolio,
-        executions: result.executions.map((e) => ({
-          action: e.action.type,
-          success: e.result.success,
-          details: e.result.details,
-          txIds: e.result.txIds,
-        })),
-        hcsLog: result.auditEntries[0]?.hcsLog || { logged: false },
-        vaultDecision:
-          result.strategy.actions.find((a) => a.type.startsWith("VAULT_")) ||
-          null,
-        dcaExecutions: result.dcaExecutions,
-        agentsUsed: result.agentsUsed,
-        durationMs: result.durationMs,
-        timestamp: result.timestamp,
+        portfolio: lendResult.portfolio,
+        execution: lendResult.execution,
+        hcsLog: lendResult.hcsLog,
+        evmAudit: lendResult.evmAudit,
+        vksReward: lendResult.vksReward,
+        vaultDecision,
+        agentsUsed: lendResult.agentsUsed || [],
+        dcaExecutions: lendResult.dcaExecutions || 0,
+        durationMs: lendResult.durationMs,
+        timestamp: lendResult.timestamp,
       },
     });
   } catch (error: any) {

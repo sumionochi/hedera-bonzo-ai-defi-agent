@@ -2439,19 +2439,82 @@ function KeeperResultInline({ data }: { data?: any }) {
       )}
 
       {/* Sentiment Context */}
-      {data.sentiment && (
-        <div className="flex items-center gap-3 text-[10px] text-gray-500 pt-1 border-t border-gray-800/60">
-          <span>Sentiment: {data.sentiment.score > 0 ? "+" : ""}{data.sentiment.score}</span>
-          <span>•</span>
-          <span>Signal: {data.sentiment.signal}</span>
-          {data.hcsLog?.logged && (
-            <>
-              <span>•</span>
-              <span className="text-emerald-400">✓ HCS Logged</span>
-            </>
-          )}
-        </div>
-      )}
+      {/* Sentiment + New Hedera Services */}
+{(data.sentiment || data.evmAudit || data.vksReward) && (
+  <div className="space-y-2 pt-2 border-t border-gray-800/60">
+    
+    {/* Sentiment */}
+    {data.sentiment && (
+      <div className="flex items-center gap-3 text-[10px] text-gray-500">
+        <span>
+          Sentiment: {data.sentiment.score > 0 ? "+" : ""}
+          {data.sentiment.score}
+        </span>
+        <span>•</span>
+        <span>Signal: {data.sentiment.signal}</span>
+        {data.hcsLog?.logged && (
+          <>
+            <span>•</span>
+            <span className="text-emerald-400">✓ HCS Logged</span>
+          </>
+        )}
+      </div>
+    )}
+
+    {/* EVM Audit */}
+    {data.evmAudit && (
+      <div className="flex items-center gap-2 text-[10px]">
+        <span className={data.evmAudit.recorded ? "text-emerald-400" : "text-gray-600"}>
+          {data.evmAudit.recorded ? "✓" : "✗"} EVM Audit
+        </span>
+
+        {data.evmAudit.recorded && data.evmAudit.decisionHash && (
+          <code className="text-gray-500 font-mono">
+            {data.evmAudit.decisionHash.substring(0, 14)}...
+          </code>
+        )}
+
+        {data.evmAudit.contractId && (
+          <a
+            href={`https://hashscan.io/testnet/contract/${data.evmAudit.contractId}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-emerald-400/60 hover:text-emerald-400"
+          >
+            Contract ↗
+          </a>
+        )}
+      </div>
+    )}
+
+    {/* VKS Reward */}
+    {data.vksReward && (
+      <div className="flex items-center gap-2 text-[10px]">
+        <span className={data.vksReward.minted ? "text-purple-400" : "text-gray-600"}>
+          {data.vksReward.minted ? "✓" : "✗"} VKS Reward
+        </span>
+
+        {data.vksReward.minted && (
+          <span className="text-purple-400 font-medium">
+            +1 VKS (balance: {data.vksReward.newBalance ?? "?"})
+          </span>
+        )}
+
+        {data.vksReward.tokenId && (
+          <a
+            href={`https://hashscan.io/testnet/token/${data.vksReward.tokenId}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-purple-400/60 hover:text-purple-400"
+          >
+            Token ↗
+          </a>
+        )}
+      </div>
+    )}
+  </div>
+)}
+      
     </div>
   );
 }
