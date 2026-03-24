@@ -39,7 +39,7 @@
 | **Bounty**          | 💰 Bonzo Finance ($8,000)                                                                            |
 | **Team Size**       | 1 (Solo Builder)                                                                                     |
 | **Live Demo**       | [Deployed](https://hedera-bonzo-ai-defi-agent.vercel.app/)                                           |
-| **Demo Video**      | [YouTube →](https://youtube.com/watch?v=PLACEHOLDER)                                                 |
+| **Demo Video**      | [Video →](https://vimeo.com/1176425523)                                                              |
 | **Hedera Services** | HCS (audit) + HTS (VKS token) + EVM (VaultMindAudit.sol) + Smart Contracts (Bonzo/ICHI/Beefy/Stader) |
 
 ---
@@ -58,7 +58,7 @@ Test with: `connect wallet 0.0.5907362` (or any Hedera testnet account)
 
 ## 📺 Demo Video
 
-> **[Watch the demo on YouTube →](https://youtube.com/watch?v=PLACEHOLDER)**
+> **[Watch the demo →](https://vimeo.com/1176425523)**
 
 ---
 
